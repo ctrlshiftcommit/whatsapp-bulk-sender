@@ -1,0 +1,252 @@
+const Database = require("better-sqlite3");
+const path = require("path");
+const fs = require("fs");
+
+class WasendDatabase {
+  constructor(userDataPath) {
+    const directory = path.join(userDataPath, "wasend-data");
+    fs.mkdirSync(directory, { recursive: true });
+    this.db = new Database(path.join(directory, "wasend.sqlite"));
+    this.db.pragma("journal_mode = WAL");
+    this.db.pragma("foreign_keys = ON");
+    this.migrate();
+  }
+
+  migrate() {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS contacts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL DEFAULT '',
+        phone TEXT NOT NULL UNIQUE,
+        tags TEXT NOT NULL DEFAULT '[]',
+        custom1 TEXT NOT NULL DEFAULT '',
+        custom2 TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE IF NOT EXISTS contact_groups (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE IF NOT EXISTS contact_group_members (
+        group_id INTEGER NOT NULL REFERENCES contact_groups(id) ON DELETE CASCADE,
+        contact_id INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+        PRIMARY KEY(group_id, contact_id)
+      );
+      CREATE TABLE IF NOT EXISTS templates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        category TEXT NOT NULL DEFAULT 'General',
+        body TEXT NOT NULL,
+        variables TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE IF NOT EXISTS media_files (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        filename TEXT NOT NULL,
+        filepath TEXT NOT NULL,
+        type TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE IF NOT EXISTS campaigns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'Draft',
+        template_id INTEGER REFERENCES templates(id),
+        group_id INTEGER REFERENCES contact_groups(id),
+        settings_json TEXT NOT NULL DEFAULT '{}',
+        scheduled_at TEXT,
+        started_at TEXT,
+        completed_at TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE IF NOT EXISTS campaign_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+        contact_id INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+        status TEXT NOT NULL,
+        error_msg TEXT,
+        sent_at TEXT
+      );
+      CREATE TABLE IF NOT EXISTS blacklist (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        phone TEXT NOT NULL UNIQUE,
+        reason TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+    `);
+    this.ensureColumn("campaigns", "total_contacts", "INTEGER NOT NULL DEFAULT 0");
+  }
+
+  ensureColumn(table, column, definition) {
+    const exists = this.all(`PRAGMA table_info(${table})`).some((item) => item.name === column);
+    if (!exists) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+
+  close() {
+    this.db.close();
+  }
+
+  all(sql, params = []) {
+    try { return this.db.prepare(sql).all(...params); }
+    catch (error) { throw new Error(`Database read failed: ${error.message}`); }
+  }
+
+  run(sql, params = []) {
+    try { return this.db.prepare(sql).run(...params); }
+    catch (error) { throw new Error(`Database write failed: ${error.message}`); }
+  }
+
+  listContacts() {
+    return this.all("SELECT * FROM contacts ORDER BY created_at DESC").map((row) => ({ ...row, tags: JSON.parse(row.tags || "[]") }));
+  }
+
+  addContact(contact) {
+    const phone = normalizePhone(contact.phone);
+    if (!phone) throw new Error("Enter a valid phone number with country code.");
+    const result = this.run(
+      "INSERT INTO contacts(name, phone, tags, custom1, custom2) VALUES (?, ?, ?, ?, ?) ON CONFLICT(phone) DO UPDATE SET name=excluded.name, tags=excluded.tags, custom1=excluded.custom1, custom2=excluded.custom2",
+      [contact.name || "", phone, JSON.stringify(contact.tags || []), contact.custom1 || "", contact.custom2 || ""],
+    );
+    return { id: result.lastInsertRowid, ...contact, phone };
+  }
+
+  removeContact(id) {
+    return this.run("DELETE FROM contacts WHERE id = ?", [id]);
+  }
+
+  removeDuplicateContacts() {
+    return this.run("DELETE FROM contacts WHERE id NOT IN (SELECT MIN(id) FROM contacts GROUP BY phone)");
+  }
+
+  listGroups() { return this.all("SELECT * FROM contact_groups ORDER BY name"); }
+  createGroup(name) { return this.run("INSERT INTO contact_groups(name) VALUES (?)", [name]); }
+  addContactToGroup(groupId, contactId) { return this.run("INSERT OR IGNORE INTO contact_group_members(group_id, contact_id) VALUES (?, ?)", [groupId, contactId]); }
+
+  listTemplates() { return this.all("SELECT * FROM templates ORDER BY created_at DESC"); }
+  saveTemplate(template) {
+    const variables = [...template.body.matchAll(/\{\{(\w+)\}\}/g)].map((match) => match[1]);
+    return this.run("INSERT INTO templates(name, category, body, variables) VALUES (?, ?, ?, ?)", [template.name, template.category || "General", template.body, JSON.stringify(variables)]);
+  }
+  removeTemplate(id) { return this.run("DELETE FROM templates WHERE id = ?", [id]); }
+  duplicateTemplate(id) {
+    return this.run("INSERT INTO templates(name, category, body, variables) SELECT name || ' copy', category, body, variables FROM templates WHERE id = ?", [id]);
+  }
+
+  listCampaigns() {
+    return this.all(`
+      SELECT campaigns.*,
+        COUNT(campaign_logs.id) AS processed,
+        SUM(CASE WHEN campaign_logs.status = 'sent' THEN 1 ELSE 0 END) AS sent,
+        SUM(CASE WHEN campaign_logs.status = 'failed' THEN 1 ELSE 0 END) AS failed
+      FROM campaigns
+      LEFT JOIN campaign_logs ON campaign_logs.campaign_id = campaigns.id
+      GROUP BY campaigns.id
+      ORDER BY campaigns.created_at DESC
+    `).map((campaign) => {
+      const sent = Number(campaign.sent || 0);
+      const failed = Number(campaign.failed || 0);
+      const total = Number(campaign.total_contacts || 0);
+      return {
+        ...campaign,
+        total,
+        sent,
+        failed,
+        pending: Math.max(total - sent - failed, 0),
+        progress: total ? Math.round(((sent + failed) / total) * 100) : 0,
+        date: campaign.scheduled_at || campaign.started_at || campaign.created_at,
+      };
+    });
+  }
+  getCampaign(id) { return this.db.prepare("SELECT campaigns.*, templates.body AS template_body FROM campaigns LEFT JOIN templates ON templates.id = campaigns.template_id WHERE campaigns.id = ?").get(id); }
+  createCampaign(campaign) {
+    const result = this.run("INSERT INTO campaigns(name, status, template_id, group_id, settings_json, scheduled_at, total_contacts) VALUES (?, ?, ?, ?, ?, ?, ?)", [campaign.name, campaign.status || "Draft", campaign.templateId || null, campaign.groupId || null, JSON.stringify(campaign.settings || {}), campaign.scheduledAt || null, Number(campaign.total || 0)]);
+    return { id: Number(result.lastInsertRowid), ...campaign };
+  }
+
+  updateCampaignStatus(id, status) {
+    this.run("UPDATE campaigns SET status = ?, started_at = CASE WHEN ? = 'Running' THEN COALESCE(started_at, CURRENT_TIMESTAMP) ELSE started_at END, completed_at = CASE WHEN ? = 'Completed' THEN CURRENT_TIMESTAMP ELSE completed_at END WHERE id = ?", [status, status, status, id]);
+    return { id, status };
+  }
+
+  rescheduleCampaign(id, scheduledAt) {
+    return this.run("UPDATE campaigns SET status = 'Scheduled', scheduled_at = ?, started_at = NULL, completed_at = NULL WHERE id = ?", [scheduledAt, id]);
+  }
+
+  listCampaignLogs(campaignId) {
+    return this.all("SELECT campaign_logs.*, contacts.name, contacts.phone FROM campaign_logs JOIN contacts ON contacts.id = campaign_logs.contact_id WHERE campaign_id = ? ORDER BY campaign_logs.id DESC", [campaignId]);
+  }
+
+  getDashboardSummary() {
+    const contacts = this.db.prepare("SELECT COUNT(*) AS count FROM contacts").get().count;
+    const logs = this.db.prepare("SELECT SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) AS sent, SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed FROM campaign_logs").get();
+    const active = this.db.prepare("SELECT COUNT(*) AS count FROM campaigns WHERE status IN ('Running', 'Paused', 'Scheduled')").get().count;
+    const timeline = this.all(`
+      SELECT date(sent_at) AS day, COUNT(*) AS sent
+      FROM campaign_logs
+      WHERE status = 'sent' AND sent_at >= datetime('now', '-6 days')
+      GROUP BY date(sent_at)
+      ORDER BY day
+    `);
+    const sent = Number(logs.sent || 0);
+    const failed = Number(logs.failed || 0);
+    return { contacts: Number(contacts), activeCampaigns: Number(active), sent, failed, successRate: sent + failed ? Math.round((sent / (sent + failed)) * 1000) / 10 : 0, timeline };
+  }
+
+  listMedia() { return this.all("SELECT * FROM media_files ORDER BY created_at DESC"); }
+  addMedia(file) { return this.run("INSERT INTO media_files(filename, filepath, type) VALUES (?, ?, ?)", [file.filename, file.filepath, file.type]); }
+  removeMedia(id) { return this.run("DELETE FROM media_files WHERE id = ?", [id]); }
+
+  listBlacklist() { return this.all("SELECT * FROM blacklist ORDER BY created_at DESC"); }
+  addBlacklist(phone, reason = "") {
+    const normalized = normalizePhone(phone);
+    if (!normalized) throw new Error("Enter a valid phone number with country code.");
+    return this.run("INSERT INTO blacklist(phone, reason) VALUES (?, ?) ON CONFLICT(phone) DO UPDATE SET reason=excluded.reason", [normalized, reason]);
+  }
+  removeBlacklist(id) { return this.run("DELETE FROM blacklist WHERE id = ?", [id]); }
+
+  clearAllData() {
+    this.db.exec("DELETE FROM campaign_logs; DELETE FROM campaigns; DELETE FROM contact_group_members; DELETE FROM contact_groups; DELETE FROM contacts; DELETE FROM templates; DELETE FROM media_files; DELETE FROM blacklist; DELETE FROM app_settings;");
+    return true;
+  }
+
+  scheduledCampaignsDue(now = new Date().toISOString()) {
+    return this.all("SELECT * FROM campaigns WHERE status = 'Scheduled' AND scheduled_at IS NOT NULL AND scheduled_at <= ? ORDER BY scheduled_at", [now]);
+  }
+
+  getSettings() {
+    return Object.fromEntries(this.all("SELECT key, value FROM app_settings").map(({ key, value }) => [key, JSON.parse(value)]));
+  }
+
+  saveSettings(settings) {
+    const save = this.db.prepare("INSERT INTO app_settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value");
+    const transaction = this.db.transaction((items) => Object.entries(items).forEach(([key, value]) => save.run(key, JSON.stringify(value))));
+    transaction(settings);
+    return this.getSettings();
+  }
+
+  getCampaignRecipients(campaignId) {
+    return this.all(`
+      SELECT c.* FROM contacts c
+      WHERE c.phone NOT IN (SELECT phone FROM blacklist)
+      AND c.id NOT IN (SELECT contact_id FROM campaign_logs WHERE campaign_id = ? AND status = 'sent')
+      ORDER BY c.id
+    `, [campaignId]);
+  }
+
+  logCampaignContact(campaignId, contactId, status, error = null) {
+    this.run("INSERT INTO campaign_logs(campaign_id, contact_id, status, error_msg, sent_at) VALUES (?, ?, ?, ?, CASE WHEN ? = 'sent' THEN CURRENT_TIMESTAMP ELSE NULL END)", [campaignId, contactId, status, error, status]);
+  }
+}
+
+function normalizePhone(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  if (digits.length < 8 || digits.length > 15) return null;
+  return `+${digits}`;
+}
+
+module.exports = { WasendDatabase, normalizePhone };
