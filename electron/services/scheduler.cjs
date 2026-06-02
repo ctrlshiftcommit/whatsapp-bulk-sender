@@ -22,20 +22,34 @@ class CampaignScheduler {
   }
 
   start(campaignId, settings = {}) {
-    if (this.running.has(campaignId)) return;
+    if (this.running.has(campaignId)) return this.resume(campaignId);
     const state = { paused: false, stopped: false };
     this.running.set(campaignId, state);
     this.database.updateCampaignStatus(campaignId, "Running");
+    this.onProgress({ campaignId, status: "Running" });
     this.process(campaignId, state, settings).catch((error) => {
+      this.running.delete(campaignId);
       this.database.updateCampaignStatus(campaignId, "Failed");
       this.onProgress({ campaignId, status: "Failed", error: error.message });
     });
+    return { id: campaignId, status: "Running" };
   }
 
   pause(campaignId) {
     const state = this.running.get(campaignId);
     if (state) state.paused = true;
     this.database.updateCampaignStatus(campaignId, "Paused");
+    this.onProgress({ campaignId, status: "Paused" });
+    return { id: campaignId, status: "Paused" };
+  }
+
+  resume(campaignId, settings = {}) {
+    const state = this.running.get(campaignId);
+    if (!state) return this.start(campaignId, settings);
+    state.paused = false;
+    this.database.updateCampaignStatus(campaignId, "Running");
+    this.onProgress({ campaignId, status: "Running" });
+    return { id: campaignId, status: "Running" };
   }
 
   stop(campaignId) {
@@ -43,6 +57,8 @@ class CampaignScheduler {
     if (state) state.stopped = true;
     this.running.delete(campaignId);
     this.database.updateCampaignStatus(campaignId, "Stopped");
+    this.onProgress({ campaignId, status: "Stopped" });
+    return { id: campaignId, status: "Stopped" };
   }
 
   async process(campaignId, state, settings) {
@@ -55,15 +71,18 @@ class CampaignScheduler {
     const batchPause = Math.max(Number(settings.pause || 5), 1) * 60 * 1000;
     const retries = Math.min(Math.max(Number(settings.retries || 1), 0), 3);
     let sent = 0;
-    for (const contact of recipients.slice(0, maxSession)) {
+    const sessionRecipients = recipients.slice(0, maxSession);
+    for (const contact of sessionRecipients) {
       while (state.paused && !state.stopped) await wait(1000);
       if (state.stopped) break;
-      if (!(await isOnline())) {
+      while (!(await isOnline())) {
         state.paused = true;
         this.database.updateCampaignStatus(campaignId, "Paused");
         this.onProgress({ campaignId, status: "Paused", error: "Internet connection unavailable. Campaign paused automatically." });
-        continue;
+        while (state.paused && !state.stopped) await wait(1000);
+        if (state.stopped) break;
       }
+      if (state.stopped) break;
       try {
         const message = renderMessage(pickMessage(settings.variations, settings.message || campaign.template_body || ""), contact);
         await retry(() => this.sender(contact, { ...settings, message }), retries);
@@ -72,14 +91,22 @@ class CampaignScheduler {
         this.onProgress({ campaignId, contact, sent, total: recipients.length, status: "Running" });
       } catch (error) {
         this.database.logCampaignContact(campaignId, contact.id, "failed", error.message);
+        this.onProgress({ campaignId, contact, sent, total: recipients.length, status: "Running", error: error.message });
       }
-      await wait(randomBetween(minDelay, maxDelay));
+      if (state.stopped) break;
+      await waitWhileActive(state, randomBetween(minDelay, maxDelay));
       if (sent > 0 && sent % batchSize === 0) {
         this.onProgress({ campaignId, sent, total: recipients.length, status: "CoolingDown" });
-        await wait(batchPause);
+        await waitWhileActive(state, batchPause);
       }
     }
     this.running.delete(campaignId);
+    if (state.stopped) return;
+    if (recipients.length > sessionRecipients.length) {
+      this.database.updateCampaignStatus(campaignId, "Paused");
+      this.onProgress({ campaignId, sent, total: recipients.length, status: "Paused", error: `Session limit reached after ${sessionRecipients.length} ${sessionRecipients.length === 1 ? "contact" : "contacts"}. Start the campaign again when you are ready to continue.` });
+      return;
+    }
     this.database.updateCampaignStatus(campaignId, "Completed");
     this.onProgress({ campaignId, sent, total: recipients.length, status: "Completed" });
     scheduleNextOccurrence(this.database, campaign, settings);
@@ -87,6 +114,13 @@ class CampaignScheduler {
 }
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function waitWhileActive(state, duration) {
+  const end = Date.now() + duration;
+  while (!state.stopped && Date.now() < end) {
+    while (state.paused && !state.stopped) await wait(500);
+    if (!state.stopped) await wait(Math.min(500, Math.max(end - Date.now(), 0)));
+  }
+}
 const randomBetween = (min, max) => Math.floor(Math.random() * (max - min + 1) + min);
 const isOnline = async () => {
   try { await dns.resolve("web.whatsapp.com"); return true; }

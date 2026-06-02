@@ -167,6 +167,15 @@ class WasendDatabase {
     const result = this.run("INSERT INTO campaigns(name, status, template_id, group_id, settings_json, scheduled_at, total_contacts) VALUES (?, ?, ?, ?, ?, ?, ?)", [campaign.name, campaign.status || "Draft", campaign.templateId || null, campaign.groupId || null, JSON.stringify(campaign.settings || {}), campaign.scheduledAt || null, Number(campaign.total || 0)]);
     return { id: Number(result.lastInsertRowid), ...campaign };
   }
+  duplicateCampaign(id) {
+    const result = this.run(`
+      INSERT INTO campaigns(name, status, template_id, group_id, settings_json, scheduled_at, total_contacts)
+      SELECT name || ' copy', 'Draft', template_id, group_id, settings_json, NULL, total_contacts
+      FROM campaigns WHERE id = ?
+    `, [id]);
+    return this.getCampaign(Number(result.lastInsertRowid));
+  }
+  removeCampaign(id) { return this.run("DELETE FROM campaigns WHERE id = ?", [id]); }
 
   updateCampaignStatus(id, status) {
     this.run("UPDATE campaigns SET status = ?, started_at = CASE WHEN ? = 'Running' THEN COALESCE(started_at, CURRENT_TIMESTAMP) ELSE started_at END, completed_at = CASE WHEN ? = 'Completed' THEN CURRENT_TIMESTAMP ELSE completed_at END WHERE id = ?", [status, status, status, id]);

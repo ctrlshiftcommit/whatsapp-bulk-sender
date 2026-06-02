@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, Menu } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const { WasendDatabase } = require("./services/database.cjs");
@@ -10,6 +10,9 @@ let mainWindow;
 let database;
 let whatsapp;
 let scheduler;
+const appIcon = path.join(__dirname, "../assets/wasend-icon.png");
+app.setName("WASend");
+app.setAppUserModelId("com.wasend.desktop");
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -18,6 +21,8 @@ function createWindow() {
     minWidth: 1100,
     minHeight: 700,
     backgroundColor: "#f5f7fb",
+    icon: appIcon,
+    title: "WASend",
     titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
@@ -32,6 +37,10 @@ function createWindow() {
 }
 
 function registerIpc() {
+  const getCampaignSettings = (id) => {
+    const campaign = database.getCampaign(id);
+    return { ...database.getSettings(), ...JSON.parse(campaign.settings_json || "{}") };
+  };
   ipcMain.handle("whatsapp:status", () => whatsapp.status);
   ipcMain.handle("whatsapp:connect", () => whatsapp.connect());
   ipcMain.handle("whatsapp:disconnect", () => whatsapp.disconnect());
@@ -68,12 +77,15 @@ function registerIpc() {
   ipcMain.handle("campaigns:list", () => database.listCampaigns());
   ipcMain.handle("dashboard:summary", () => database.getDashboardSummary());
   ipcMain.handle("campaigns:create", (_event, campaign) => database.createCampaign(campaign));
-  ipcMain.handle("campaigns:start", (_event, id) => {
-    const campaign = database.getCampaign(id);
-    return scheduler.start(id, { ...database.getSettings(), ...JSON.parse(campaign.settings_json || "{}") });
-  });
+  ipcMain.handle("campaigns:start", (_event, id) => scheduler.start(id, getCampaignSettings(id)));
+  ipcMain.handle("campaigns:resume", (_event, id) => scheduler.resume(id, getCampaignSettings(id)));
   ipcMain.handle("campaigns:pause", (_event, id) => scheduler.pause(id));
   ipcMain.handle("campaigns:stop", (_event, id) => scheduler.stop(id));
+  ipcMain.handle("campaigns:duplicate", (_event, id) => database.duplicateCampaign(id));
+  ipcMain.handle("campaigns:remove", (_event, id) => {
+    scheduler.stop(id);
+    return database.removeCampaign(id);
+  });
   ipcMain.handle("campaigns:logs", (_event, id) => database.listCampaignLogs(id));
   ipcMain.handle("media:list", () => database.listMedia());
   ipcMain.handle("media:add", async () => {
@@ -108,6 +120,7 @@ function registerIpc() {
 }
 
 app.whenReady().then(() => {
+  Menu.setApplicationMenu(null);
   database = new WasendDatabase(app.getPath("userData"));
   whatsapp = new WhatsAppSession({
     userDataPath: app.getPath("userData"),

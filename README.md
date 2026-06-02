@@ -15,42 +15,100 @@ WASend is an offline-first Electron desktop application for managing opt-in What
 - Conservative sending scheduler with configurable delay range and a maximum session cap
 - Dashboard, reports, onboarding, settings, notifications, and local-only persistence
 
-## Requirements
+## Install the ready-made Windows app
 
-- Node.js 20 or newer
-- npm 10 or newer
-- Google Chrome installed, or `CHROME_PATH` set to a Chromium-compatible executable
+Use these steps if someone has sent you the WASend installer and you only want to use the app:
 
-## Development
+1. Download `WASend Setup 1.0.0.exe`.
+2. Double-click the downloaded installer.
+3. Follow the Windows prompts to install WASend.
+4. Open **WASend** from the Start menu.
+5. Click **Connect WhatsApp** in WASend.
+6. WASend opens its own separate Chromium browser window. Scan the QR code in that browser window using WhatsApp on your phone.
+7. Keep the separate Chromium window open while sending messages.
+
+You do **not** need to install Node.js, npm, Chrome, or Brave when using the ready-made Windows installer. The installer includes the Chromium browser that WASend needs.
+
+Windows may warn you before opening an unsigned installer. Only continue if the installer came from a source you trust.
+
+## Run the project from source
+
+Use this section only if you are developing WASend or building the installer yourself.
+
+### 1. Install Node.js
+
+Install **Node.js 20 LTS or newer** from the official download page:
+
+- [Download Node.js](https://nodejs.org/en/download)
+
+Choose the Windows `.msi` installer, open it, and keep the default options. Node.js includes `npm`, so you do not install npm separately.
+
+After installation, open a new PowerShell window and confirm that both commands work:
+
+```powershell
+node --version
+npm --version
+```
+
+### 2. Install Git if needed
+
+If you downloaded the project as a ZIP file, skip this step. If you want to clone the project from GitHub, install Git:
+
+- [Download Git for Windows](https://git-scm.com/download/win)
+
+Clone the repository, or extract the ZIP file, then open PowerShell inside the project folder.
+
+### 3. Install project dependencies
+
+Run:
 
 ```powershell
 npm install
+```
+
+The first install downloads the packages and Puppeteer's compatible Chromium browser. Chromium is stored in the project-level `puppeteer-cache` folder, outside `node_modules`. Deleting and reinstalling `node_modules` will not download Chromium again while that cache folder remains in place.
+
+If the Chromium download was interrupted, run:
+
+```powershell
+npx puppeteer browsers install chrome
+```
+
+### 4. Start the desktop app
+
+Run:
+
+```powershell
 npm run dev
 ```
 
-To work on the renderer in a normal browser:
+WASend opens as a desktop application. Use the **Connect WhatsApp** button to launch the separate Chromium window and scan the real WhatsApp Web QR code.
+
+### 5. Optional browser-only UI preview
+
+To preview the React interface without Electron, run:
 
 ```powershell
 npm run dev:web
 ```
 
-The browser preview uses renderer fallback data. Run through Electron for SQLite and Puppeteer IPC.
+Then open [http://127.0.0.1:5173/](http://127.0.0.1:5173/) in a browser. The browser-only preview cannot access SQLite or Puppeteer. Use the Electron desktop app for real data and WhatsApp connections.
 
-## Production build
+## Build a Windows installer
 
-Build the renderer:
-
-```powershell
-npm run build
-```
-
-Package the desktop app for the current operating system:
+After completing `npm install`, run:
 
 ```powershell
 npm run package
 ```
 
-`electron-builder` writes installers to `release/`. Windows uses NSIS and macOS uses DMG.
+The Windows installer is written to:
+
+```text
+release/WASend Setup 1.0.0.exe
+```
+
+The installer includes Puppeteer's managed Chromium resource. People installing WASend do not need a system Chrome or Brave browser.
 
 ## Project structure
 
@@ -65,8 +123,9 @@ electron/
     whatsapp.cjs           Puppeteer WhatsApp Web session
 src/
   App.jsx                  React desktop interface
-  data.js                  Browser-preview seed data
   styles.css               Tailwind layers and shared primitives
+.puppeteerrc.cjs            Stable Puppeteer browser-cache location
+puppeteer-cache/            Downloaded managed Chromium browser
 ```
 
 ## Storage and privacy
@@ -75,7 +134,8 @@ SQLite data and the WhatsApp Web browser profile are stored under Electron's loc
 
 ## Tunable values
 
-- Set `CHROME_PATH` when Chrome is installed in a non-standard location.
+- WhatsApp automation always launches Puppeteer's bundled Chromium in a separate visible window. WASend does not use an installed Chrome or Brave browser.
+- The Windows installer includes the Puppeteer-managed Chromium build as an application resource, so installed copies do not depend on a browser download during first launch.
 - Sending limits are stored in the local `app_settings` table.
 - Defaults are intentionally conservative: at least five seconds between sends and at most 500 messages per session.
 

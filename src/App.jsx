@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle, BarChart3, Bell, CalendarClock, Check, CheckCircle2, ChevronDown,
   ChevronRight, CircleHelp, Clock3, ContactRound, Download, File, FileText, Film,
@@ -10,14 +10,14 @@ import {
 
 const api = window.wasend || {
   getConnection: async () => ({ status: "disconnected" }),
-  connect: async () => ({ status: "scanning" }),
+  connect: async () => ({ status: "waiting-for-scan" }),
   disconnect: async () => ({ status: "disconnected" }),
   getSettings: async () => ({}),
   saveSettings: async () => true,
   listContacts: async () => [],
   addContact: async (contact) => ({ ...contact, id: Date.now() }),
   removeContact: async () => true,
-  importContacts: async ({ content }) => content.split(/\r?\n/).map((phone, index) => ({ id: Date.now() + index, name: `Imported Contact ${index + 1}`, phone: phone.startsWith("+") ? phone : `+91${phone.replace(/\D/g, "")}`, tags: ["imported"], custom1: "", custom2: "" })).filter((contact) => contact.phone.length > 3),
+  importContacts: async ({ content }) => content.split(/\r?\n/).map((phone, index) => ({ id: Date.now() + index, name: "", phone: phone.startsWith("+") ? phone : `+91${phone.replace(/\D/g, "")}`, tags: ["imported"], custom1: "", custom2: "" })).filter((contact) => contact.phone.length > 3),
   importContactFile: async () => [],
   exportContacts: async () => true,
   listTemplates: async () => [],
@@ -26,8 +26,11 @@ const api = window.wasend || {
   getDashboardSummary: async () => ({ contacts: 0, activeCampaigns: 0, sent: 0, failed: 0, successRate: 0, timeline: [] }),
   createCampaign: async (campaign) => ({ ...campaign, id: Date.now() }),
   startCampaign: async () => true,
+  resumeCampaign: async () => true,
   pauseCampaign: async () => true,
   stopCampaign: async () => true,
+  duplicateCampaign: async () => true,
+  removeCampaign: async () => true,
   listMedia: async () => [],
   addMedia: async () => null,
   listBlacklist: async () => [],
@@ -65,10 +68,37 @@ function App() {
   const [modal, setModal] = useState(null);
   const [toast, setToast] = useState(null);
   const [onboarding, setOnboarding] = useState(false);
+  const [notifications, setNotifications] = useState([]);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const lastConnectionStatus = useRef("disconnected");
+  const notifiedCampaignStatuses = useRef(new Map());
+
+  const addNotification = (message, tone = "info") => {
+    setNotifications((items) => [{
+      id: `${Date.now()}-${Math.random()}`,
+      message,
+      tone,
+      createdAt: new Date().toISOString(),
+      read: false,
+    }, ...items].slice(0, 30));
+  };
+  const recordConnectionStatus = (value) => {
+    setConnection(value);
+    if (value.status !== lastConnectionStatus.current) {
+      const message = {
+        connected: `WhatsApp connected${value.profileName ? ` as ${value.profileName}` : ""}.`,
+        disconnected: value.error ? `WhatsApp disconnected: ${value.error}` : "WhatsApp disconnected.",
+        "opening-browser": "Opening the WhatsApp Web browser.",
+        "waiting-for-scan": "WhatsApp Web is waiting for a QR scan in the browser window.",
+      }[value.status];
+      if (message) addNotification(message, value.status === "disconnected" && value.error ? "error" : value.status === "connected" ? "success" : "info");
+      lastConnectionStatus.current = value.status;
+    }
+  };
 
   useEffect(() => {
-    api.getConnection().then(setConnection).catch(() => {});
-    if (window.wasend) api.getSettings().then((settings) => settings.reconnect !== false && api.connect()).catch(() => {});
+    api.getConnection().then(recordConnectionStatus).catch(() => {});
+    if (window.wasend) api.getSettings().then((settings) => settings.reconnect !== false && api.connect().then(recordConnectionStatus)).catch(() => {});
     Promise.all([api.listContacts(), api.listTemplates(), api.listCampaigns(), api.listMedia(), api.getDashboardSummary()])
       .then(([freshContacts, freshTemplates, freshCampaigns, freshMedia, freshSummary]) => {
         setContacts(freshContacts);
@@ -78,9 +108,16 @@ function App() {
         setSummary(freshSummary);
       })
       .finally(() => setLoading(false));
-    const listener = (value) => setConnection(value);
+    const listener = (value) => recordConnectionStatus(value);
     api.onConnection?.(listener);
-    const progress = ({ campaignId, sent, total, status }) => setCampaigns((items) => items.map((campaign) => campaign.id === campaignId ? { ...campaign, sent: sent ?? campaign.sent, pending: total ? total - (sent || 0) : campaign.pending, progress: total ? Math.round(((sent || 0) / total) * 100) : campaign.progress, status } : campaign));
+    const progress = ({ campaignId, sent, total, status }) => {
+      setCampaigns((items) => items.map((campaign) => campaign.id === campaignId ? { ...campaign, sent: sent ?? campaign.sent, pending: total ? total - (sent || 0) : campaign.pending, progress: total ? Math.round(((sent || 0) / total) * 100) : campaign.progress, status } : campaign));
+      const priorStatus = notifiedCampaignStatuses.current.get(campaignId);
+      if (status && status !== priorStatus && ["Running", "Paused", "Completed", "Failed", "Stopped"].includes(status)) {
+        addNotification(`Campaign ${status.toLowerCase()}.`, status === "Completed" ? "success" : status === "Failed" ? "error" : "info");
+        notifiedCampaignStatuses.current.set(campaignId, status);
+      }
+    };
     api.onCampaignProgress?.(progress);
     return () => { api.offConnection?.(listener); api.offCampaignProgress?.(); };
   }, []);
@@ -99,24 +136,24 @@ function App() {
     window.setTimeout(() => setToast(null), 2800);
   };
 
-  const context = { page, setPage, contacts, setContacts, templates, setTemplates, campaigns, setCampaigns, media, setMedia, summary, loading, connection, setConnection, setModal, notify };
+  const context = { page, setPage, contacts, setContacts, templates, setTemplates, campaigns, setCampaigns, media, setMedia, summary, setSummary, loading, connection, setConnection, setModal, notify };
   const Page = { Dashboard, ContactsPage, TemplatesPage, CampaignsPage, MediaPage, ReportsPage, SettingsPage }[page === "Media Library" ? "MediaPage" : `${page}Page`] || Dashboard;
 
   return (
     <div className="flex min-h-screen bg-mist">
       <Sidebar page={page} setPage={setPage} connection={connection} campaigns={campaigns} />
       <main className="ml-[238px] min-h-screen w-[calc(100%-238px)]">
-        <Header page={page} setModal={setModal} connection={connection} />
+        <Header page={page} setModal={setModal} connection={connection} notifications={notifications} notificationsOpen={notificationsOpen} setNotificationsOpen={setNotificationsOpen} setNotifications={setNotifications} />
         <div className="px-8 pb-10 pt-5">
           {page === "Dashboard" && <PolicyBanner />}
           <Page {...context} />
         </div>
       </main>
-      {modal === "contact" && <ContactModal onClose={() => setModal(null)} onSave={async (contact) => { const saved = await api.addContact(contact); setContacts((items) => [...items.filter((item) => item.phone !== saved.phone), saved]); setModal(null); notify("Contact added successfully"); }} />}
+      {modal === "contact" && <ContactModal onClose={() => setModal(null)} onSave={async (contact) => { const saved = await api.addContact(contact); setContacts((items) => [...items.filter((item) => item.phone !== saved.phone), saved]); setSummary(await api.getDashboardSummary()); setModal(null); notify("Contact added successfully"); }} />}
       {modal === "template" && <TemplateModal onClose={() => setModal(null)} onSave={async (template) => { const saved = await api.saveTemplate(template); setTemplates((items) => [{ ...template, id: saved.id || Date.now() }, ...items]); setModal(null); notify("Template saved"); }} />}
-      {modal === "campaign" && <CampaignWizard contacts={contacts} templates={templates} media={media} onClose={() => setModal(null)} onLaunch={async (campaign) => { const saved = await api.createCampaign(campaign); setCampaigns((items) => [{ ...campaign, id: saved.id || Date.now() }, ...items]); setModal(null); notify("Campaign created. Review policy limits before launch.", "warning"); }} />}
-      {modal === "import" && <ImportModal onClose={() => setModal(null)} onImport={async (payload) => { const added = await api.importContacts({ ...payload, defaultCountryCode: "91" }); setContacts((items) => [...items, ...added]); setModal(null); notify(`${added.length} contacts imported`); }} onImportFile={async () => { const added = await api.importContactFile(); setContacts((items) => [...items, ...added]); setModal(null); notify(`${added.length} contacts imported`); }} />}
-      {modal === "connect" && <ConnectionModal connection={connection} onClose={() => setModal(null)} onConnect={async () => setConnection(await api.connect())} onDisconnect={async () => { await api.disconnect?.(); setConnection({ status: "disconnected" }); setModal(null); notify("WhatsApp disconnected", "warning"); }} />}
+      {modal === "campaign" && <CampaignWizard contacts={contacts} templates={templates} media={media} onClose={() => setModal(null)} onLaunch={async (campaign) => { const saved = await api.createCampaign(campaign); setCampaigns((items) => [{ ...campaign, id: saved.id || Date.now() }, ...items]); setSummary(await api.getDashboardSummary()); setModal(null); notify("Campaign created. Review policy limits before launch.", "warning"); }} />}
+      {modal === "import" && <ImportModal onClose={() => setModal(null)} onImport={async (payload) => { const added = await api.importContacts({ ...payload, defaultCountryCode: "91" }); setContacts(await api.listContacts()); setSummary(await api.getDashboardSummary()); setModal(null); notify(`${added.length} contacts imported`); }} onImportFile={async () => { const added = await api.importContactFile(); setContacts(await api.listContacts()); setSummary(await api.getDashboardSummary()); setModal(null); notify(`${added.length} contacts imported`); }} />}
+      {modal === "connect" && <ConnectionModal connection={connection} onClose={() => setModal(null)} onConnect={async () => recordConnectionStatus(await api.connect())} onDisconnect={async () => { await api.disconnect?.(); recordConnectionStatus({ status: "disconnected" }); setModal(null); notify("WhatsApp disconnected", "warning"); }} />}
       {onboarding && <Onboarding onClose={() => setOnboarding(false)} setModal={setModal} />}
       {toast && <Toast {...toast} />}
       <button onClick={() => setOnboarding(true)} className="fixed bottom-5 right-5 flex h-10 w-10 items-center justify-center rounded-full bg-navy text-white shadow-lg transition hover:scale-105" aria-label="Open onboarding"><CircleHelp size={18} /></button>
@@ -143,14 +180,24 @@ function Sidebar({ page, setPage, connection, campaigns }) {
   </aside>;
 }
 
-function Header({ page, setModal, connection }) {
+function Header({ page, setModal, connection, notifications, notificationsOpen, setNotificationsOpen, setNotifications }) {
   const profileName = connection.profileName || "Connect WhatsApp";
   const profileInitials = connection.profileName ? initials(connection.profileName) : "--";
+  const unread = notifications.filter((item) => !item.read).length;
+  const toggleNotifications = () => {
+    setNotificationsOpen((open) => {
+      if (!open) setNotifications((items) => items.map((item) => ({ ...item, read: true })));
+      return !open;
+    });
+  };
   return <header className="flex h-[76px] items-center justify-between border-b border-slate-200 bg-white px-8">
     <div><h1 className="text-xl font-bold text-ink">{page}</h1><p className="mt-1 text-xs text-slate-500">{page === "Dashboard" ? "Welcome back. Here is what is happening today." : `Manage your ${page.toLowerCase()} in one place.`}</p></div>
     <div className="flex items-center gap-3">
       <button onClick={() => setModal("campaign")} className="btn-primary"><Plus size={16} /> New Campaign</button>
-      <button className="flex h-10 w-10 items-center justify-center rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50"><Bell size={17} /></button>
+      <div className="relative">
+        <button onClick={toggleNotifications} className="relative flex h-10 w-10 items-center justify-center rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50" aria-label="Open notifications" aria-expanded={notificationsOpen}><Bell size={17} />{unread > 0 && <span className="absolute -right-1.5 -top-1.5 flex min-h-4 min-w-4 items-center justify-center rounded-full bg-rose-500 px-1 text-[9px] font-bold text-white">{unread > 9 ? "9+" : unread}</span>}</button>
+        {notificationsOpen && <NotificationCenter notifications={notifications} onClear={() => setNotifications([])} />}
+      </div>
       <button onClick={() => setModal("connect")} className="flex items-center gap-2 border-l border-slate-200 pl-3 text-left">
         <div className="flex h-9 w-9 items-center justify-center rounded-full bg-emerald-100 text-xs font-bold text-emerald-700">{profileInitials}</div>
         <div><div className="text-xs font-semibold text-slate-800">{profileName}</div><div className={cx("mt-0.5 flex items-center gap-1 text-[10px] capitalize", connection.status === "connected" ? "text-emerald-600" : "text-slate-500")}><span className={cx("h-1.5 w-1.5 rounded-full", connection.status === "connected" ? "bg-emerald" : "bg-slate-400")} /> {connection.status}</div></div>
@@ -158,6 +205,13 @@ function Header({ page, setModal, connection }) {
       </button>
     </div>
   </header>;
+}
+
+function NotificationCenter({ notifications, onClear }) {
+  return <section className="absolute right-0 top-12 z-30 w-80 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl">
+    <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3"><div><h2 className="text-sm font-bold text-ink">Notifications</h2><p className="mt-0.5 text-[11px] text-slate-400">Connection and campaign updates</p></div>{notifications.length > 0 && <button onClick={onClear} className="text-[11px] font-bold text-slate-500 hover:text-rose-600">Clear all</button>}</div>
+    {notifications.length ? <div className="max-h-80 overflow-auto">{notifications.map((item) => <div key={item.id} className="flex gap-3 border-b border-slate-100 px-4 py-3 last:border-0"><span className={cx("mt-1 h-2 w-2 shrink-0 rounded-full", item.tone === "success" ? "bg-emerald" : item.tone === "error" ? "bg-rose-500" : "bg-sky-500")} /><div><p className="text-xs leading-5 text-slate-700">{item.message}</p><p className="mt-1 text-[10px] text-slate-400">{formatNotificationTime(item.createdAt)}</p></div></div>)}</div> : <EmptyState icon={Bell} title="No notifications yet" text="Connection changes and campaign updates will appear here." compact />}
+  </section>;
 }
 
 function PolicyBanner() {
@@ -204,21 +258,23 @@ function OverviewChart({ timeline, loading }) {
 
 function ConnectionCard({ connection, setModal }) {
   const connected = connection.status === "connected";
+  const opening = connection.status === "opening-browser";
+  const waiting = connection.status === "waiting-for-scan";
   return <section className="panel p-5"><div className="flex items-center justify-between"><h2 className="text-sm font-bold text-ink">WhatsApp Connection</h2><Wifi size={16} className={connected ? "text-emerald" : "text-amber-500"} /></div>
     <div className="mt-5 flex h-12 w-12 items-center justify-center rounded-full bg-emerald-50 text-emerald"><Phone size={21} /></div>
-    <div className="mt-4 text-sm font-bold text-slate-800">{connected ? "WhatsApp connected" : "Not connected"}</div>
-    <p className="mt-1 text-xs text-slate-500">{connection.profileName || "Connect an account to begin"}</p><p className="mt-0.5 text-xs text-slate-400">{connection.phone || "No active session"}</p>
-    <button onClick={() => setModal("connect")} className="btn-secondary mt-4 w-full justify-center">{connected ? "Manage connection" : "Scan QR code"}</button>
+    <div className="mt-4 text-sm font-bold text-slate-800">{connected ? "WhatsApp connected" : opening ? "Opening browser..." : waiting ? "Waiting for QR scan" : "Not connected"}</div>
+    <p className="mt-1 text-xs text-slate-500">{connection.profileName || (waiting ? "Scan in the separate browser window" : "Connect an account to begin")}</p><p className="mt-0.5 text-xs text-slate-400">{connection.phone || (connected ? "Session active" : "No active session")}</p>
+    <button onClick={() => setModal("connect")} className="btn-secondary mt-4 w-full justify-center">{connected ? "Manage connection" : waiting ? "View instructions" : "Connect WhatsApp"}</button>
   </section>;
 }
 
-function ContactsPage({ contacts, setContacts, setModal, notify }) {
+function ContactsPage({ contacts, setContacts, setModal, setSummary, notify }) {
   const [query, setQuery] = useState("");
   const shown = contacts.filter((c) => `${c.name} ${c.phone} ${c.tags.join(" ")}`.toLowerCase().includes(query.toLowerCase()));
   return <div className="space-y-5">
     <div className="flex items-center justify-between"><p className="text-sm text-slate-500">{contacts.length} saved contacts with opt-in records and tags.</p><div className="flex gap-2"><button onClick={async () => { await api.exportContacts(); notify("Contacts exported to CSV"); }} className="btn-secondary"><Download size={16} /> Export</button><button onClick={() => setModal("import")} className="btn-secondary"><Import size={16} /> Import</button><button onClick={() => setModal("contact")} className="btn-primary"><Plus size={16} /> Add Contact</button></div></div>
     <section className="panel overflow-hidden"><div className="flex items-center justify-between border-b border-slate-100 p-4"><SearchBox value={query} setValue={setQuery} placeholder="Search name, phone, or tag" /><button className="btn-secondary"><ListFilter size={15} /> Filter</button></div>
-      {shown.length ? <table className="w-full"><thead className="border-b border-slate-100 bg-slate-50"><tr>{["Contact", "Phone number", "Tags", "Location", "Plan", ""].map((h) => <th key={h} className="table-head px-4 py-3">{h}</th>)}</tr></thead><tbody>{shown.map((contact) => <tr key={contact.id} className="border-b border-slate-100 text-xs hover:bg-slate-50/70"><td className="px-4 py-3"><div className="flex items-center gap-2.5"><Avatar name={contact.name} /><b>{contact.name || "Unnamed contact"}</b></div></td><td className="px-4 py-3 text-slate-600">{contact.phone}</td><td className="px-4 py-3"><div className="flex gap-1">{contact.tags.map((tag) => <Tag key={tag}>{tag}</Tag>)}</div></td><td className="px-4 py-3 text-slate-500">{contact.custom1}</td><td className="px-4 py-3 text-slate-500">{contact.custom2}</td><td className="px-4 py-3 text-right"><button onClick={async () => { await api.removeContact(contact.id); setContacts((items) => items.filter((x) => x.id !== contact.id)); notify("Contact removed", "warning"); }} className="text-slate-400 hover:text-rose-500"><Trash2 size={15} /></button></td></tr>)}</tbody></table> : <EmptyState icon={ContactRound} title={query ? "No matching contacts" : "No contacts yet"} text={query ? "Try a different search term." : "Import a list or add an opted-in contact manually."} />}
+      {shown.length ? <table className="w-full"><thead className="border-b border-slate-100 bg-slate-50"><tr>{["Contact", "Phone number", "Tags", "Location", "Plan", ""].map((h) => <th key={h} className="table-head px-4 py-3">{h}</th>)}</tr></thead><tbody>{shown.map((contact) => <tr key={contact.id} className="border-b border-slate-100 text-xs hover:bg-slate-50/70"><td className="px-4 py-3"><div className="flex items-center gap-2.5"><Avatar name={contact.name} /><b>{contact.name || "Unnamed contact"}</b></div></td><td className="px-4 py-3 text-slate-600">{contact.phone}</td><td className="px-4 py-3"><div className="flex gap-1">{contact.tags.map((tag) => <Tag key={tag}>{tag}</Tag>)}</div></td><td className="px-4 py-3 text-slate-500">{contact.custom1}</td><td className="px-4 py-3 text-slate-500">{contact.custom2}</td><td className="px-4 py-3 text-right"><button onClick={async () => { await api.removeContact(contact.id); setContacts((items) => items.filter((x) => x.id !== contact.id)); setSummary(await api.getDashboardSummary()); notify("Contact removed", "warning"); }} className="text-slate-400 hover:text-rose-500"><Trash2 size={15} /></button></td></tr>)}</tbody></table> : <EmptyState icon={ContactRound} title={query ? "No matching contacts" : "No contacts yet"} text={query ? "Try a different search term." : "Import a list or add an opted-in contact manually."} />}
     </section>
   </div>;
 }
@@ -234,14 +290,16 @@ function TemplatesPage({ templates, setTemplates, setModal, notify }) {
 }
 
 function CampaignsPage({ campaigns, setCampaigns, setModal, notify }) {
-  const changeStatus = async (id, status) => { if (status === "Running") await api.startCampaign(id); else if (status === "Paused") await api.pauseCampaign(id); else if (status === "Stopped") await api.stopCampaign(id); setCampaigns((items) => items.map((c) => c.id === id ? { ...c, status } : c)); notify(`Campaign ${status.toLowerCase()}`); };
+  const changeStatus = async (campaign, status) => { if (status === "Running") { if (campaign.status === "Paused") await api.resumeCampaign(campaign.id); else await api.startCampaign(campaign.id); } else if (status === "Paused") await api.pauseCampaign(campaign.id); else if (status === "Stopped") await api.stopCampaign(campaign.id); setCampaigns((items) => items.map((c) => c.id === campaign.id ? { ...c, status } : c)); notify(`Campaign ${status.toLowerCase()}`); };
+  const duplicate = async (id) => { await api.duplicateCampaign(id); setCampaigns(await api.listCampaigns()); notify("Campaign duplicated as a draft"); };
+  const remove = async (id) => { if (!window.confirm("Delete this campaign and its delivery logs? This cannot be undone.")) return; await api.removeCampaign(id); setCampaigns((items) => items.filter((campaign) => campaign.id !== id)); notify("Campaign deleted", "warning"); };
   return <div><div className="mb-5 flex items-center justify-between"><p className="text-sm text-slate-500">Review, schedule, and monitor opted-in campaign sends.</p><button onClick={() => setModal("campaign")} className="btn-primary"><Plus size={16} /> New Campaign</button></div>
-    <section className="panel overflow-hidden"><div className="flex items-center justify-between border-b border-slate-100 p-4"><SearchBox placeholder="Search campaigns" /><button className="btn-secondary"><ListFilter size={15} /> All statuses</button></div>{campaigns.length ? <CampaignTable campaigns={campaigns} actions changeStatus={changeStatus} /> : <EmptyState icon={Megaphone} title="No campaigns yet" text="Create a campaign after importing opted-in contacts and a message template." />}</section>
+    <section className="panel overflow-hidden"><div className="flex items-center justify-between border-b border-slate-100 p-4"><SearchBox placeholder="Search campaigns" /><button className="btn-secondary"><ListFilter size={15} /> All statuses</button></div>{campaigns.length ? <CampaignTable campaigns={campaigns} actions changeStatus={changeStatus} duplicate={duplicate} remove={remove} /> : <EmptyState icon={Megaphone} title="No campaigns yet" text="Create a campaign after importing opted-in contacts and a message template." />}</section>
   </div>;
 }
 
-function CampaignTable({ campaigns, compact, actions, changeStatus }) {
-  return <table className="w-full"><thead className="border-b border-slate-100 bg-slate-50"><tr>{["Campaign", "Status", "Recipients", "Progress", "Sent date", actions ? "Actions" : ""].map((h) => <th key={h} className="table-head px-4 py-3">{h}</th>)}</tr></thead><tbody>{campaigns.map((c) => <tr key={c.id} className="border-b border-slate-100 text-xs hover:bg-slate-50/70"><td className="px-4 py-3 font-semibold text-slate-700">{c.name}</td><td className="px-4 py-3"><Status value={c.status} /></td><td className="px-4 py-3 text-slate-500">{c.total}</td><td className="px-4 py-3"><div className="flex items-center gap-2"><div className="h-1.5 w-20 rounded-full bg-slate-100"><div className="h-full rounded-full bg-emerald" style={{ width: `${c.progress}%` }} /></div><span className="text-[11px] text-slate-400">{c.progress}%</span></div></td><td className="px-4 py-3 text-slate-500">{c.date}</td>{actions && <td className="px-4 py-3"><div className="flex gap-2">{c.status === "Running" ? <button onClick={() => changeStatus(c.id, "Paused")} className="text-amber-600" aria-label="Pause"><Pause size={15} /></button> : <button onClick={() => changeStatus(c.id, "Running")} className="text-emerald" aria-label="Start"><Play size={15} /></button>}<button onClick={() => changeStatus(c.id, "Stopped")} className="text-slate-400 hover:text-rose-500" aria-label="Stop"><Square size={14} /></button></div></td>}</tr>)}</tbody></table>;
+function CampaignTable({ campaigns, compact, actions, changeStatus, duplicate, remove }) {
+  return <table className="w-full"><thead className="border-b border-slate-100 bg-slate-50"><tr>{["Campaign", "Status", "Recipients", "Progress", "Sent date", actions ? "Actions" : ""].map((h) => <th key={h} className="table-head px-4 py-3">{h}</th>)}</tr></thead><tbody>{campaigns.map((c) => <tr key={c.id} className="border-b border-slate-100 text-xs hover:bg-slate-50/70"><td className="px-4 py-3 font-semibold text-slate-700">{c.name}</td><td className="px-4 py-3"><Status value={c.status} /></td><td className="px-4 py-3 text-slate-500">{c.total}</td><td className="px-4 py-3"><div className="flex items-center gap-2"><div className="h-1.5 w-20 rounded-full bg-slate-100"><div className="h-full rounded-full bg-emerald" style={{ width: `${c.progress}%` }} /></div><span className="text-[11px] text-slate-400">{c.progress}%</span></div></td><td className="px-4 py-3 text-slate-500">{formatDate(c.date)}</td>{actions && <td className="px-4 py-3"><div className="flex gap-2">{c.status === "Running" ? <button onClick={() => changeStatus(c, "Paused")} className="text-amber-600" aria-label="Pause campaign"><Pause size={15} /></button> : <button onClick={() => changeStatus(c, "Running")} className="text-emerald" aria-label={c.status === "Paused" ? "Resume campaign" : "Start campaign"}><Play size={15} /></button>}<button onClick={() => changeStatus(c, "Stopped")} className="text-slate-400 hover:text-rose-500" aria-label="Stop campaign"><Square size={14} /></button><button onClick={() => duplicate(c.id)} className="text-slate-400 hover:text-emerald" aria-label="Duplicate campaign"><Copy size={14} /></button><button onClick={() => remove(c.id)} className="text-slate-400 hover:text-rose-500" aria-label="Delete campaign"><Trash2 size={14} /></button></div></td>}</tr>)}</tbody></table>;
 }
 
 function MediaPage({ media, setMedia, notify }) {
@@ -260,7 +318,7 @@ function SettingsPage({ notify }) {
   const [blockedPhone, setBlockedPhone] = useState("");
   useEffect(() => { api.listBlacklist().then(setBlacklist).catch(() => {}); }, []);
   const update = (key, value) => setSettings((current) => ({ ...current, [key]: value }));
-  return <div className="grid grid-cols-[1fr_290px] gap-5"><section className="panel divide-y divide-slate-100"><div className="p-5"><SectionTitle title="Sending limits" sub="Use conservative limits and send only to opted-in contacts." /><div className="mt-5 grid grid-cols-3 gap-4"><SettingInput label="Minimum delay (sec)" value={settings.minDelay} onChange={(v) => update("minDelay", v)} /><SettingInput label="Maximum delay (sec)" value={settings.maxDelay} onChange={(v) => update("maxDelay", v)} /><SettingInput label="Max messages / session" value={settings.maxSession} onChange={(v) => update("maxSession", v)} /><SettingInput label="Batch size" value={settings.batch} onChange={(v) => update("batch", v)} /><SettingInput label="Pause between batches (min)" value={settings.pause} onChange={(v) => update("pause", v)} /><SettingInput label="Retry failed messages" value={settings.retries} onChange={(v) => update("retries", v)} /></div></div><div className="p-5"><SectionTitle title="Application preferences" /><div className="mt-4 space-y-4"><Toggle label="Auto-reconnect WhatsApp Web session" value={settings.reconnect} setValue={(v) => update("reconnect", v)} /><Toggle label="Play notification sound when a campaign completes" value={settings.sounds} setValue={(v) => update("sounds", v)} /></div></div><div className="p-5"><button onClick={() => { api.saveSettings(settings); notify("Settings saved"); }} className="btn-primary">Save settings</button></div></section><aside className="space-y-4"><section className="panel p-5"><h2 className="text-sm font-bold text-ink">Do-not-contact list</h2><p className="mt-2 text-xs leading-5 text-slate-500">Blocked numbers are skipped in every campaign.</p><div className="mt-3 flex gap-2"><input value={blockedPhone} onChange={(e) => setBlockedPhone(e.target.value)} className="input py-2" placeholder="+91..." /><button onClick={async () => { await api.addBlacklist(blockedPhone, "Manual block"); setBlacklist(await api.listBlacklist()); setBlockedPhone(""); notify("Number blocked"); }} className="btn-secondary">Add</button></div><p className="mt-3 text-[11px] text-slate-400">{blacklist.length} blocked numbers</p></section><section className="panel border-rose-200 p-5"><h2 className="text-sm font-bold text-rose-700">Danger zone</h2><p className="mt-2 text-xs leading-5 text-slate-500">Clear local campaign data or reset this application. This cannot be undone.</p><button onClick={async () => { if (window.confirm("Clear all WASend data? This cannot be undone.")) { await api.resetApp(); notify("Application data cleared", "warning"); } }} className="mt-4 rounded-lg border border-rose-200 px-3 py-2 text-xs font-bold text-rose-600 hover:bg-rose-50">Reset application</button></section></aside></div>;
+  return <div className="grid grid-cols-[1fr_290px] gap-5"><section className="panel divide-y divide-slate-100"><div className="p-5"><SectionTitle title="Sending limits" sub="Use conservative limits and send only to opted-in contacts." /><div className="mt-5 grid grid-cols-3 gap-4"><SettingInput label="Minimum delay (sec)" value={settings.minDelay} onChange={(v) => update("minDelay", v)} /><SettingInput label="Maximum delay (sec)" value={settings.maxDelay} onChange={(v) => update("maxDelay", v)} /><SettingInput label="Max messages / session" value={settings.maxSession} onChange={(v) => update("maxSession", v)} /><SettingInput label="Batch size" value={settings.batch} onChange={(v) => update("batch", v)} /><SettingInput label="Pause between batches (min)" value={settings.pause} onChange={(v) => update("pause", v)} /><SettingInput label="Retry failed messages" value={settings.retries} onChange={(v) => update("retries", v)} /></div></div><div className="p-5"><SectionTitle title="Application preferences" /><div className="mt-4 space-y-4"><Toggle label="Auto-reconnect WhatsApp Web session" value={settings.reconnect} setValue={(v) => update("reconnect", v)} /><Toggle label="Play notification sound when a campaign completes" value={settings.sounds} setValue={(v) => update("sounds", v)} /></div></div><div className="p-5"><button onClick={() => { api.saveSettings(settings); notify("Settings saved"); }} className="btn-primary">Save settings</button></div></section><aside className="space-y-4"><section className="panel p-5"><h2 className="text-sm font-bold text-ink">Do-not-contact list</h2><p className="mt-2 text-xs leading-5 text-slate-500">Blocked numbers are skipped in every campaign.</p><div className="mt-3 flex gap-2"><input value={blockedPhone} onChange={(e) => setBlockedPhone(e.target.value)} className="input py-2" placeholder="+91..." /><button onClick={async () => { await api.addBlacklist(blockedPhone, "Manual block"); setBlacklist(await api.listBlacklist()); setBlockedPhone(""); notify("Number blocked"); }} className="btn-secondary">Add</button></div><p className="mt-3 text-[11px] text-slate-400">{blacklist.length} blocked numbers</p></section><section className="panel border-rose-200 p-5"><h2 className="text-sm font-bold text-rose-700">Danger zone</h2><p className="mt-2 text-xs leading-5 text-slate-500">Clear local campaign data or reset this application. This cannot be undone.</p><button onClick={async () => { if (window.confirm("Clear all WASend data? This cannot be undone.")) { await api.resetApp(); window.location.reload(); } }} className="mt-4 rounded-lg border border-rose-200 px-3 py-2 text-xs font-bold text-rose-600 hover:bg-rose-50">Reset application</button></section></aside></div>;
 }
 
 function ContactModal({ onClose, onSave }) {
@@ -269,7 +327,7 @@ function ContactModal({ onClose, onSave }) {
 }
 
 function TemplateModal({ onClose, onSave }) {
-  const [form, setForm] = useState({ name: "", category: "Follow-up", body: "Hi {{name}},\n\n" });
+  const [form, setForm] = useState({ name: "", category: "Follow-up", body: "" });
   return <Modal title="Create template" sub="Personalize messages with variables such as {{name}} and {{phone}}." onClose={onClose}><Field label="Template name" value={form.name} onChange={(v) => setForm({ ...form, name: v })} /><label className="label mt-4">Message body</label><textarea className="input h-40 resize-none leading-6" value={form.body} onChange={(e) => setForm({ ...form, body: e.target.value })} /><div className="mt-2 flex justify-between text-[11px] text-slate-400"><span>*bold* · _italic_ · ~strike~</span><span>{form.body.length} characters</span></div><ModalFooter onClose={onClose} onSave={() => onSave(form)} label="Save template" /></Modal>;
 }
 
@@ -297,7 +355,9 @@ function CampaignWizard({ contacts, templates, media, onClose, onLaunch }) {
 
 function ConnectionModal({ connection, onClose, onConnect, onDisconnect }) {
   const connected = connection.status === "connected";
-  return <Modal title="WhatsApp connection" sub="Your browser session is stored locally on this device." onClose={onClose}><div className="flex flex-col items-center rounded-xl border border-slate-100 bg-slate-50 p-6 text-center">{connected ? <><div className="flex h-16 w-16 items-center justify-center rounded-full bg-emerald-100 text-emerald"><CheckCircle2 size={30} /></div><h3 className="mt-4 text-sm font-bold">WhatsApp connected</h3><p className="mt-1 text-xs text-slate-500">{connection.profileName} · {connection.phone}</p><button onClick={onDisconnect} className="mt-5 rounded-lg border border-rose-200 px-3 py-2 text-xs font-bold text-rose-600">Disconnect account</button></> : <>{connection.qrDataUrl ? <img className="h-44 w-44 bg-white p-2 shadow-sm" src={connection.qrDataUrl} alt="WhatsApp Web QR code" /> : <div className="flex h-44 w-44 items-center justify-center bg-white shadow-sm"><RefreshCw className="animate-spin text-emerald" size={28} /></div>}<h3 className="mt-4 text-sm font-bold">{connection.status === "scanning" ? "Scan the QR code" : "Connect WhatsApp Web"}</h3><p className="mt-1 text-xs text-slate-500">Open WhatsApp on your phone, then choose Linked devices.</p><button onClick={onConnect} className="btn-secondary mt-4"><RefreshCw size={14} /> {connection.status === "scanning" ? "Refresh QR code" : "Start connection"}</button></>}</div></Modal>;
+  const opening = connection.status === "opening-browser";
+  const waiting = connection.status === "waiting-for-scan";
+  return <Modal title="WhatsApp connection" sub="WASend controls a separate visible Chromium window and stores its login session locally." onClose={onClose}><div className="flex flex-col items-center rounded-xl border border-slate-100 bg-slate-50 p-6 text-center">{connected ? <><div className="flex h-16 w-16 items-center justify-center rounded-full bg-emerald-100 text-emerald"><CheckCircle2 size={30} /></div><h3 className="mt-4 text-sm font-bold">WhatsApp connected</h3>{(connection.profileName || connection.phone) && <p className="mt-1 text-xs text-slate-500">{[connection.profileName, connection.phone].filter(Boolean).join(" · ")}</p>}<p className="mt-2 max-w-sm text-xs leading-5 text-slate-500">Keep the WhatsApp Web browser window open while campaigns are running.</p><button onClick={onDisconnect} className="mt-5 rounded-lg border border-rose-200 px-3 py-2 text-xs font-bold text-rose-600">Disconnect account</button></> : <><div className="flex h-16 w-16 items-center justify-center rounded-full bg-emerald-100 text-emerald">{opening ? <RefreshCw className="animate-spin" size={28} /> : <Phone size={28} />}</div><h3 className="mt-4 text-sm font-bold">{opening ? "Opening WhatsApp Web browser..." : waiting ? "Scan QR code in the browser window" : "Connect WhatsApp Web"}</h3><p className="mt-2 max-w-sm text-xs leading-5 text-slate-500">{waiting ? "A separate Chromium window is open. Scan the QR shown on web.whatsapp.com with your phone, then return to WASend." : "WASend will open its bundled Chromium browser and navigate to web.whatsapp.com."}</p>{connection.error && <p className="mt-3 max-w-sm rounded-lg bg-rose-50 px-3 py-2 text-xs text-rose-600">{connection.error}</p>}<button onClick={onConnect} disabled={opening} className={cx("btn-secondary mt-4", opening && "cursor-not-allowed opacity-50")}><RefreshCw size={14} /> {waiting ? "Reopen browser" : "Open WhatsApp Web browser"}</button></>}</div></Modal>;
 }
 
 function Onboarding({ onClose, setModal }) {
@@ -320,5 +380,17 @@ function QueueItem({ name, time, count }) { return <div className="rounded-lg bo
 function Metric({ label, value }) { return <div className="rounded-lg border border-slate-100 bg-slate-50 p-3"><p className="text-[11px] font-medium text-slate-400">{label}</p><p className="mt-1 text-lg font-bold text-ink">{value}</p></div>; }
 function WizardChoice({ title, text, icon: Icon, secondary }) { return <div><h3 className="text-sm font-bold">{title}</h3><button className="mt-4 flex w-full items-center gap-4 rounded-xl border border-emerald bg-emerald-50 p-4 text-left"><span className="flex h-10 w-10 items-center justify-center rounded-lg bg-white text-emerald"><Icon size={19} /></span><span><b className="block text-sm text-slate-700">{text}</b>{secondary && <small className="mt-1 block text-slate-500">{secondary}</small>}</span><CheckCircle2 className="ml-auto text-emerald" size={18} /></button></div>; }
 function Toast({ message, tone }) { return <div className={cx("fixed bottom-5 left-1/2 z-[70] flex -translate-x-1/2 items-center gap-2 rounded-lg px-4 py-3 text-xs font-semibold text-white shadow-lg", tone === "warning" ? "bg-amber-600" : "bg-slate-800")}>{tone === "warning" ? <AlertTriangle size={15} /> : <CheckCircle2 size={15} className="text-emerald-300" />}{message}</div>; }
+function EmptyState({ icon: Icon, title, text, compact }) { return <div className={cx("flex flex-col items-center justify-center px-5 text-center", compact ? "min-h-28 py-5" : "min-h-56 py-10")}><span className="flex h-10 w-10 items-center justify-center rounded-full bg-slate-100 text-slate-400"><Icon size={18} /></span><h3 className="mt-3 text-sm font-bold text-slate-700">{title}</h3><p className="mt-1 max-w-xs text-xs leading-5 text-slate-400">{text}</p></div>; }
+function formatDate(value) { return value ? new Date(value).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "Not scheduled"; }
+function formatNotificationTime(value) { return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
+function lastSevenDays(timeline = []) {
+  const counts = new Map(timeline.map((item) => [item.day, Number(item.sent || 0)]));
+  return Array.from({ length: 7 }, (_item, index) => {
+    const date = new Date();
+    date.setDate(date.getDate() - (6 - index));
+    const day = date.toISOString().slice(0, 10);
+    return { day, sent: counts.get(day) || 0, label: date.toLocaleDateString([], { weekday: "short" }) };
+  });
+}
 
 export default App;
