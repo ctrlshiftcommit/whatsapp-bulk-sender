@@ -298,54 +298,107 @@ class WhatsAppSession {
       if (invalidText) throw new Error(`Number +${cleanPhone} is not available on WhatsApp. ${invalidText}`);
 
       const ext = path.extname(mediaPath).toLowerCase();
-      const isImage = [".jpg", ".jpeg", ".png", ".gif", ".webp"].includes(ext);
-      const isVideo = [".mp4", ".mov", ".avi", ".mkv"].includes(ext);
-      const usePhotoOption = isImage || isVideo;
+      const isImageOrVideo = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".mov"].includes(ext);
 
       await this.page.waitForTimeout(500);
-      const clipClicked = await this.page.evaluate(() => {
+      const plusClicked = await this.page.evaluate(() => {
         const selectors = [
-          '[data-testid="attach-menu-plus"]',
-          '[data-testid="clip"]',
-          'span[data-icon="attach-menu-plus"]',
-          'span[data-icon="clip"]',
-          'div[title="Attach"]',
+          '[data-testid="attach-media"]',
+          '[data-testid="plus-icon"]',
+          'span[data-icon="plus"]',
+          'span[data-icon="plus-rounded"]',
+          'div[aria-label="Attach media"]',
           'button[aria-label="Attach"]',
+          'footer span[data-icon]',
         ];
+        for (const selector of selectors) {
+          const elements = document.querySelectorAll(selector);
+          for (const element of elements) {
+            if (element.closest("footer")) {
+              const target = element.closest("button,[role='button']") || element;
+              target.click();
+              return selector;
+            }
+          }
+        }
+        return null;
+      });
+      console.log("Plus button clicked:", plusClicked);
+      if (!plusClicked) {
+        await this.debugScreenshot("plus_btn_not_found").catch(() => {});
+        throw new Error("Could not find + button in footer.");
+      }
+
+      await this.page.waitForTimeout(700);
+      await this.debugScreenshot("plus_menu_open").catch(() => {});
+
+      const menuResult = await this.page.evaluate((isMedia) => {
+        const mediaSelectors = [
+          '[data-testid="mi-attach-image"]',
+          '[data-testid="attach-image"]',
+          'li[data-testid*="image"]',
+          'li[data-testid*="photo"]',
+          'span[data-icon="attach-image"]',
+          'span[data-icon="image"]',
+        ];
+        const documentSelectors = [
+          '[data-testid="mi-attach-document"]',
+          '[data-testid="attach-document"]',
+          'li[data-testid*="document"]',
+          'span[data-icon="attach-document"]',
+          'span[data-icon="document"]',
+        ];
+        const selectors = isMedia ? mediaSelectors : documentSelectors;
         for (const selector of selectors) {
           const element = document.querySelector(selector);
           if (element) {
-            const target = element.closest("button,[role='button']") || element;
+            const target = element.closest("button,[role='button'],li") || element;
             target.click();
-            return true;
+            return { clicked: selector, items: [] };
           }
         }
-        return false;
-      });
-      if (!clipClicked) throw new Error("Could not find attach button.");
 
-      await this.page.waitForTimeout(800);
-      let fileInputFound = false;
-      for (let attempt = 0; attempt < 5; attempt += 1) {
-        fileInputFound = await this.page.evaluate((isPhoto) => {
-          const inputs = Array.from(document.querySelectorAll('input[type="file"]'));
-          console.log("Found file inputs:", inputs.map((input) => input.accept));
-          if (isPhoto) return inputs.some((input) => input.accept.includes("image") || input.accept.includes("video"));
-          return inputs.some((input) => !input.accept.includes("image") || input.accept === "*" || input.accept === "");
-        }, usePhotoOption);
-        if (fileInputFound) break;
-        await this.page.waitForTimeout(600);
+        const candidates = document.querySelectorAll('li, div[role="button"], div[role="menuitem"], span[role="button"]');
+        for (const element of candidates) {
+          const text = (element.textContent || "").trim().toLowerCase();
+          if (isMedia && ["photos & videos", "photos", "images", "photo & video"].includes(text)) {
+            element.click();
+            return { clicked: `text:${text}`, items: [] };
+          }
+          if (!isMedia && ["document", "documents"].includes(text)) {
+            element.click();
+            return { clicked: `text:${text}`, items: [] };
+          }
+        }
+
+        const items = Array.from(document.querySelectorAll('li, div[role="menuitem"], div[role="button"]')).map((element) => ({
+          text: (element.textContent || "").trim(),
+          testid: element.getAttribute("data-testid"),
+          role: element.getAttribute("role"),
+          ariaLabel: element.getAttribute("aria-label"),
+        }));
+        return { clicked: null, items };
+      }, isImageOrVideo);
+      console.log("Menu option clicked:", menuResult.clicked);
+      if (!menuResult.clicked) {
+        console.log("ALL MENU ITEMS:", JSON.stringify(menuResult.items, null, 2));
+        await this.debugScreenshot("menu_item_not_found").catch(() => {});
+        throw new Error("Could not find Photos/Documents option in attach menu.");
       }
 
+      await this.page.waitForTimeout(600);
       const allInputs = await this.page.$$('input[type="file"]');
       console.log(`Found ${allInputs.length} file inputs`);
-      if (!allInputs.length) throw new Error("No file input found after opening attach menu.");
-      const targetInput = await this.pickAttachmentInput(allInputs, usePhotoOption);
-      if (!targetInput) throw new Error("Target file input not found.");
+      if (!allInputs.length) {
+        await this.debugScreenshot("no_file_input").catch(() => {});
+        throw new Error("File input not found after clicking menu option.");
+      }
+      const targetInput = allInputs[allInputs.length - 1];
 
       await targetInput.uploadFile(mediaPath);
       console.log(`File uploaded: ${mediaPath}`);
-      await this.page.waitForTimeout(2000);
+      await this.page.waitForTimeout(2500);
+      await this.debugScreenshot("after_upload").catch(() => {});
 
       let previewLoaded = false;
       for (let attempt = 0; attempt < 8; attempt += 1) {
@@ -414,16 +467,6 @@ class WhatsAppSession {
       await this.debugScreenshot("send-media-failed").catch(() => {});
       throw new Error(`Could not send media to +${cleanPhone}: ${error.message}`);
     }
-  }
-
-  async pickAttachmentInput(inputs, usePhotoOption) {
-    for (const input of inputs) {
-      const accept = await input.evaluate((element) => element.accept || "").catch(() => "");
-      const isPhotoInput = accept.includes("image") || accept.includes("video");
-      if (usePhotoOption && isPhotoInput) return input;
-      if (!usePhotoOption && (!accept.includes("image") || accept === "*" || accept === "")) return input;
-    }
-    return usePhotoOption ? inputs[0] : inputs[inputs.length - 1];
   }
 
   async findComposerSelector() {
