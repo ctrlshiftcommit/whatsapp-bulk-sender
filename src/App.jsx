@@ -177,6 +177,10 @@ function App() {
   useEffect(() => {
     const handleShortcut = (event) => {
       if (!(event.ctrlKey || event.metaKey)) return;
+      const target = event.target;
+      const tagName = target?.tagName?.toLowerCase();
+      const isEditing = target?.isContentEditable || ["input", "textarea", "select"].includes(tagName);
+      if (isEditing) return;
       if (event.key.toLowerCase() === "n") { event.preventDefault(); setModal("campaign"); }
       if (event.key.toLowerCase() === "i") { event.preventDefault(); setModal("import"); }
     };
