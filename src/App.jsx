@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle, BarChart3, Bell, CalendarClock, Check, CheckCircle2, ChevronDown,
   ChevronRight, CircleHelp, Clock3, ContactRound, Download, File, FileText, Film,
-  Gauge, Image, Import, LayoutDashboard, ListFilter, Megaphone, MessageCircle,
+  Gauge, Image, Import, Info, LayoutDashboard, ListFilter, Megaphone, MessageCircle,
   MessageSquareText, MoreHorizontal, Music2, Paperclip, Pause, Pencil, Phone,
   Play, Plus, RefreshCw, Search, Send, Settings, ShieldAlert, Sparkles, Square, Copy,
   Trash2, Upload, Users, Wifi, X,
@@ -108,6 +108,7 @@ function App() {
   const [toast, setToast] = useState(null);
   const [importPreview, setImportPreview] = useState(null);
   const [onboarding, setOnboarding] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
   const [notifications, setNotifications] = useState([]);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const lastConnectionStatus = useRef("disconnected");
@@ -200,7 +201,9 @@ function App() {
       {modal === "import-map" && importPreview && <ImportMapModal preview={importPreview} groups={groups} onClose={() => { setModal(null); setImportPreview(null); }} onImport={async (payload) => { try { const settings = await api.getSettings(); const added = await api.importContactFile({ ...importPreview, ...payload, defaultCountryCode: String(settings.country || "91").replace(/\D/g, "") }); setContacts(await api.listContacts()); setGroups(await api.listGroups?.() || []); setSummary(await api.getDashboardSummary()); setModal(null); setImportPreview(null); notify(`${added.length} contacts imported`); } catch (error) { reportError(error, "Could not import contacts"); } }} />}
       {modal === "connect" && <ConnectionModal connection={connection} onClose={() => setModal(null)} onConnect={async () => { try { recordConnectionStatus(await api.connect()); } catch (error) { reportError(error, "Could not open WhatsApp Web"); } }} onDisconnect={async () => { try { await api.disconnect?.(); recordConnectionStatus({ status: "disconnected" }); setModal(null); notify("WhatsApp disconnected", "warning"); } catch (error) { reportError(error, "Could not disconnect WhatsApp"); } }} />}
       {onboarding && <Onboarding onClose={() => setOnboarding(false)} setModal={setModal} />}
+      {aboutOpen && <AboutModal onClose={() => setAboutOpen(false)} />}
       {toast && <Toast {...toast} />}
+      <button onClick={() => setAboutOpen(true)} className="fixed bottom-5 right-[68px] flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-600 shadow-lg transition hover:scale-105 hover:text-emerald" aria-label="About WASend"><Info size={18} /></button>
       <button onClick={() => setOnboarding(true)} className="fixed bottom-5 right-5 flex h-10 w-10 items-center justify-center rounded-full bg-navy text-white shadow-lg transition hover:scale-105" aria-label="Open onboarding"><CircleHelp size={18} /></button>
     </div>
   );
@@ -500,6 +503,20 @@ function ConnectionModal({ connection, onClose, onConnect, onDisconnect }) {
 
 function Onboarding({ onClose, setModal }) {
   return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-6"><section className="w-[720px] rounded-2xl bg-white p-8 shadow-2xl"><div className="flex justify-between"><div><div className="flex h-12 w-12 items-center justify-center rounded-xl bg-emerald text-white"><Sparkles size={22} /></div><h2 className="mt-5 text-2xl font-bold text-ink">Get started with WASend</h2><p className="mt-2 text-sm text-slate-500">Set up your responsible messaging workspace in three short steps.</p></div><button onClick={onClose}><X size={18} /></button></div><div className="mt-7 grid grid-cols-3 gap-3">{[["1", "Connect WhatsApp", "Link your WhatsApp Web session.", "connect"], ["2", "Import contacts", "Add opted-in recipients only.", "import"], ["3", "Create campaign", "Prepare and review your first send.", "campaign"]].map(([n, title, text, modal]) => <button key={n} onClick={() => { onClose(); setModal(modal); }} className="rounded-xl border border-slate-200 p-4 text-left transition hover:border-emerald hover:bg-emerald-50"><span className="flex h-7 w-7 items-center justify-center rounded-full bg-emerald text-xs font-bold text-white">{n}</span><h3 className="mt-4 text-sm font-bold">{title}</h3><p className="mt-1 text-xs leading-5 text-slate-500">{text}</p></button>)}</div></section></div>;
+}
+
+function AboutModal({ onClose }) {
+  return <Modal title="About WASend" sub="Developed by SP" onClose={onClose}>
+    <div className="rounded-xl border border-slate-100 bg-slate-50 p-5">
+      <div className="flex items-start gap-3">
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-white text-emerald shadow-sm"><Info size={18} /></span>
+        <div>
+          <p className="text-sm font-semibold text-slate-800">Developed by SP</p>
+          <p className="mt-2 text-xs leading-5 text-slate-500">Feedback and bug fixes at <a className="font-semibold text-emerald hover:underline" href="mailto:imakecoolappsforfun@gmail.com">imakecoolappsforfun@gmail.com</a></p>
+        </div>
+      </div>
+    </div>
+  </Modal>;
 }
 
 function Modal({ title, sub, onClose, children, wide }) {
