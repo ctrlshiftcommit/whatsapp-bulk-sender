@@ -228,6 +228,22 @@ class WasendDatabase {
     return this.all("SELECT campaign_logs.*, contacts.name, contacts.phone FROM campaign_logs JOIN contacts ON contacts.id = campaign_logs.contact_id WHERE campaign_id = ? ORDER BY campaign_logs.id DESC", [campaignId]);
   }
 
+  getCampaignDeliveryStats(campaignId) {
+    const row = this.db.prepare(`
+      SELECT
+        SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) AS sent,
+        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+        COUNT(*) AS processed
+      FROM campaign_logs
+      WHERE campaign_id = ?
+    `).get(campaignId);
+    return {
+      sent: Number(row?.sent || 0),
+      failed: Number(row?.failed || 0),
+      processed: Number(row?.processed || 0),
+    };
+  }
+
   getDashboardSummary(days = 7) {
     const range = Math.min(Math.max(Number(days || 7), 1), 90);
     const contacts = this.db.prepare("SELECT COUNT(*) AS count FROM contacts").get().count;

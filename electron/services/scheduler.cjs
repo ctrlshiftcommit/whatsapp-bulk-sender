@@ -27,11 +27,11 @@ class CampaignScheduler {
     const state = { paused: false, stopped: false };
     this.running.set(campaignId, state);
     this.database.updateCampaignStatus(campaignId, "Running");
-    this.onProgress({ campaignId, status: "Running" });
+    this.emitProgress(campaignId, { status: "Running" });
     this.process(campaignId, state, settings).catch((error) => {
       this.running.delete(campaignId);
       this.database.updateCampaignStatus(campaignId, "Failed");
-      this.onProgress({ campaignId, status: "Failed", error: error.message });
+      this.emitProgress(campaignId, { status: "Failed", error: error.message });
     });
     return { id: campaignId, status: "Running" };
   }
@@ -40,7 +40,7 @@ class CampaignScheduler {
     const state = this.running.get(campaignId);
     if (state) state.paused = true;
     this.database.updateCampaignStatus(campaignId, "Paused");
-    this.onProgress({ campaignId, status: "Paused" });
+    this.emitProgress(campaignId, { status: "Paused" });
     return { id: campaignId, status: "Paused" };
   }
 
@@ -49,7 +49,7 @@ class CampaignScheduler {
     if (!state) return this.start(campaignId, settings);
     state.paused = false;
     this.database.updateCampaignStatus(campaignId, "Running");
-    this.onProgress({ campaignId, status: "Running" });
+    this.emitProgress(campaignId, { status: "Running" });
     return { id: campaignId, status: "Running" };
   }
 
@@ -58,7 +58,7 @@ class CampaignScheduler {
     if (state) state.stopped = true;
     this.running.delete(campaignId);
     this.database.updateCampaignStatus(campaignId, "Stopped");
-    this.onProgress({ campaignId, status: "Stopped" });
+    this.emitProgress(campaignId, { status: "Stopped" });
     return { id: campaignId, status: "Stopped" };
   }
 
@@ -74,8 +74,6 @@ class CampaignScheduler {
     const batchSize = Math.max(Number(settings.batch || 40), 1);
     const batchPause = Math.max(Number(settings.pause || 5), 1) * 60 * 1000;
     const retries = Math.min(Math.max(Number(settings.retries ?? 1), 0), 3);
-    let sent = 0;
-    let failed = 0;
     const sessionRecipients = recipients.slice(0, maxSession);
     for (const [index, contact] of sessionRecipients.entries()) {
       while (state.paused && !state.stopped) await wait(1000);
@@ -83,7 +81,7 @@ class CampaignScheduler {
       while (!(await isOnline())) {
         state.paused = true;
         this.database.updateCampaignStatus(campaignId, "Paused");
-        this.onProgress({ campaignId, status: "Paused", error: "Internet connection unavailable. Campaign paused automatically." });
+        this.emitProgress(campaignId, { status: "Paused", error: "Internet connection unavailable. Campaign paused automatically." });
         while (state.paused && !state.stopped) await wait(1000);
         if (state.stopped) break;
       }
@@ -92,18 +90,17 @@ class CampaignScheduler {
         const message = renderMessage(pickMessage(settings.variations, settings.message || campaign.template_body || ""), contact);
         await retry(() => this.sender(contact, { ...settings, message }), retries);
         this.database.logCampaignContact(campaignId, contact.id, "sent");
-        sent += 1;
-        this.onProgress({ campaignId, contact, sent, failed, total: recipients.length, status: "Running" });
+        this.emitProgress(campaignId, { contact, total: recipients.length, status: "Running" });
       } catch (error) {
         this.database.logCampaignContact(campaignId, contact.id, "failed", error.message);
-        failed += 1;
-        this.onProgress({ campaignId, contact, sent, failed, total: recipients.length, status: "Running", error: error.message });
+        this.emitProgress(campaignId, { contact, total: recipients.length, status: "Running", error: error.message });
       }
       if (state.stopped) break;
       const hasNextRecipient = index < sessionRecipients.length - 1;
       if (hasNextRecipient) await waitWhileActive(state, randomBetween(minDelay, maxDelay));
-      if (hasNextRecipient && sent > 0 && sent % batchSize === 0) {
-        this.onProgress({ campaignId, sent, failed, total: recipients.length, status: "CoolingDown" });
+      const stats = this.database.getCampaignDeliveryStats(campaignId);
+      if (hasNextRecipient && stats.sent > 0 && stats.sent % batchSize === 0) {
+        this.emitProgress(campaignId, { total: recipients.length, status: "CoolingDown" });
         await waitWhileActive(state, batchPause);
       }
     }
@@ -111,12 +108,28 @@ class CampaignScheduler {
     if (state.stopped) return;
     if (recipients.length > sessionRecipients.length) {
       this.database.updateCampaignStatus(campaignId, "Paused");
-      this.onProgress({ campaignId, sent, failed, total: recipients.length, status: "Paused", error: `Session limit reached after ${sessionRecipients.length} ${sessionRecipients.length === 1 ? "contact" : "contacts"}. Start the campaign again when you are ready to continue.` });
+      this.emitProgress(campaignId, { total: recipients.length, status: "Paused", error: `Session limit reached after ${sessionRecipients.length} ${sessionRecipients.length === 1 ? "contact" : "contacts"}. Start the campaign again when you are ready to continue.` });
       return;
     }
     this.database.updateCampaignStatus(campaignId, "Completed");
-    this.onProgress({ campaignId, sent, failed, total: recipients.length, status: "Completed" });
+    this.emitProgress(campaignId, { total: recipients.length, status: "Completed" });
     scheduleNextOccurrence(this.database, campaign, settings);
+  }
+
+  emitProgress(campaignId, progress = {}) {
+    const stats = this.database.getCampaignDeliveryStats(campaignId);
+    const campaign = this.database.getCampaign(campaignId);
+    const total = Number(progress.total ?? campaign?.total_contacts ?? 0);
+    this.onProgress({
+      campaignId,
+      ...progress,
+      sent: stats.sent,
+      failed: stats.failed,
+      processed: stats.processed,
+      pending: Math.max(total - stats.sent - stats.failed, 0),
+      total,
+      summary: this.database.getDashboardSummary(),
+    });
   }
 }
 

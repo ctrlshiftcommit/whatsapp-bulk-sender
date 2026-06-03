@@ -162,8 +162,9 @@ function App() {
       .finally(() => setLoading(false));
     const listener = (value) => recordConnectionStatus(value);
     api.onConnection?.(listener);
-    const progress = ({ campaignId, sent, failed, total, status }) => {
-      setCampaigns((items) => items.map((campaign) => campaign.id === campaignId ? { ...campaign, sent: sent ?? campaign.sent, failed: failed ?? campaign.failed, pending: total ? Math.max(total - (sent || 0) - (failed || 0), 0) : campaign.pending, progress: total ? Math.round((((sent || 0) + (failed || 0)) / total) * 100) : campaign.progress, status } : campaign));
+    const progress = ({ campaignId, sent, failed, pending, total, status, summary: freshSummary }) => {
+      setCampaigns((items) => items.map((campaign) => campaign.id === campaignId ? { ...campaign, sent: sent ?? campaign.sent, failed: failed ?? campaign.failed, pending: pending ?? (total ? Math.max(total - (sent || 0) - (failed || 0), 0) : campaign.pending), progress: total ? Math.round((((sent || 0) + (failed || 0)) / total) * 100) : campaign.progress, status } : campaign));
+      if (freshSummary) setSummary(freshSummary);
       const priorStatus = notifiedCampaignStatuses.current.get(campaignId);
       if (status && status !== priorStatus && ["Running", "Paused", "Completed", "Failed", "Stopped"].includes(status)) {
         addNotification(`Campaign ${status.toLowerCase()}.`, status === "Completed" ? "success" : status === "Failed" ? "error" : "info");
@@ -283,7 +284,19 @@ function PolicyBanner() {
 function Dashboard({ campaigns, contacts, connection, setModal, summary, loading }) {
   const [range, setRange] = useState(summary.range || 7);
   const [chartSummary, setChartSummary] = useState(summary);
-  useEffect(() => setChartSummary(summary), [summary]);
+  useEffect(() => {
+    let cancelled = false;
+    if (Number(summary.range || 7) === Number(range)) {
+      setChartSummary(summary);
+      return () => { cancelled = true; };
+    }
+    api.getDashboardSummary(range).then((freshSummary) => {
+      if (!cancelled) setChartSummary(freshSummary);
+    }).catch(() => {
+      if (!cancelled) setChartSummary(summary);
+    });
+    return () => { cancelled = true; };
+  }, [summary, range]);
   const changeRange = async (value) => {
     const days = Number(value);
     setRange(days);
