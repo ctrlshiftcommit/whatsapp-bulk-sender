@@ -1,9 +1,10 @@
 const dns = require("dns").promises;
 
 class CampaignScheduler {
-  constructor({ database, sender, onProgress }) {
+  constructor({ database, sender, canSend, onProgress }) {
     this.database = database;
     this.sender = sender;
+    this.canSend = canSend || (() => true);
     this.onProgress = onProgress;
     this.running = new Map();
     this.poller = null;
@@ -64,15 +65,19 @@ class CampaignScheduler {
   async process(campaignId, state, settings) {
     const campaign = this.database.getCampaign(campaignId);
     const recipients = this.database.getCampaignRecipients(campaignId);
+    if (!campaign) throw new Error("Campaign was not found.");
+    if (!recipients.length) throw new Error("No eligible recipients were found for this campaign.");
+    if (!this.canSend()) throw new Error("WhatsApp Web is not connected.");
     const maxSession = Math.min(Number(settings.maxSession || 500), 500);
     const minDelay = Math.max(Number(settings.minDelay || 8), 5) * 1000;
     const maxDelay = Math.max(Number(settings.maxDelay || 15), minDelay / 1000) * 1000;
     const batchSize = Math.max(Number(settings.batch || 40), 1);
     const batchPause = Math.max(Number(settings.pause || 5), 1) * 60 * 1000;
-    const retries = Math.min(Math.max(Number(settings.retries || 1), 0), 3);
+    const retries = Math.min(Math.max(Number(settings.retries ?? 1), 0), 3);
     let sent = 0;
+    let failed = 0;
     const sessionRecipients = recipients.slice(0, maxSession);
-    for (const contact of sessionRecipients) {
+    for (const [index, contact] of sessionRecipients.entries()) {
       while (state.paused && !state.stopped) await wait(1000);
       if (state.stopped) break;
       while (!(await isOnline())) {
@@ -88,15 +93,17 @@ class CampaignScheduler {
         await retry(() => this.sender(contact, { ...settings, message }), retries);
         this.database.logCampaignContact(campaignId, contact.id, "sent");
         sent += 1;
-        this.onProgress({ campaignId, contact, sent, total: recipients.length, status: "Running" });
+        this.onProgress({ campaignId, contact, sent, failed, total: recipients.length, status: "Running" });
       } catch (error) {
         this.database.logCampaignContact(campaignId, contact.id, "failed", error.message);
-        this.onProgress({ campaignId, contact, sent, total: recipients.length, status: "Running", error: error.message });
+        failed += 1;
+        this.onProgress({ campaignId, contact, sent, failed, total: recipients.length, status: "Running", error: error.message });
       }
       if (state.stopped) break;
-      await waitWhileActive(state, randomBetween(minDelay, maxDelay));
-      if (sent > 0 && sent % batchSize === 0) {
-        this.onProgress({ campaignId, sent, total: recipients.length, status: "CoolingDown" });
+      const hasNextRecipient = index < sessionRecipients.length - 1;
+      if (hasNextRecipient) await waitWhileActive(state, randomBetween(minDelay, maxDelay));
+      if (hasNextRecipient && sent > 0 && sent % batchSize === 0) {
+        this.onProgress({ campaignId, sent, failed, total: recipients.length, status: "CoolingDown" });
         await waitWhileActive(state, batchPause);
       }
     }
@@ -104,11 +111,11 @@ class CampaignScheduler {
     if (state.stopped) return;
     if (recipients.length > sessionRecipients.length) {
       this.database.updateCampaignStatus(campaignId, "Paused");
-      this.onProgress({ campaignId, sent, total: recipients.length, status: "Paused", error: `Session limit reached after ${sessionRecipients.length} ${sessionRecipients.length === 1 ? "contact" : "contacts"}. Start the campaign again when you are ready to continue.` });
+      this.onProgress({ campaignId, sent, failed, total: recipients.length, status: "Paused", error: `Session limit reached after ${sessionRecipients.length} ${sessionRecipients.length === 1 ? "contact" : "contacts"}. Start the campaign again when you are ready to continue.` });
       return;
     }
     this.database.updateCampaignStatus(campaignId, "Completed");
-    this.onProgress({ campaignId, sent, total: recipients.length, status: "Completed" });
+    this.onProgress({ campaignId, sent, failed, total: recipients.length, status: "Completed" });
     scheduleNextOccurrence(this.database, campaign, settings);
   }
 }

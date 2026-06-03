@@ -41,6 +41,17 @@ function registerIpc() {
     const campaign = database.getCampaign(id);
     return { ...database.getSettings(), ...JSON.parse(campaign.settings_json || "{}") };
   };
+  const assertCampaignReady = (id) => {
+    const campaign = database.getCampaign(id);
+    if (!campaign) throw new Error("Campaign was not found.");
+    const settings = getCampaignSettings(id);
+    const message = String(settings.message || campaign.template_body || "").trim();
+    const recipients = database.getCampaignRecipients(id);
+    if (!message && !settings.mediaPath) throw new Error("Choose a message template or add campaign text before launching.");
+    if (!recipients.length) throw new Error("Add at least one non-blacklisted contact before launching.");
+    if (campaign.status !== "Scheduled" && whatsapp.status.status !== "connected") throw new Error("Connect WhatsApp Web before launching a campaign.");
+    return settings;
+  };
   ipcMain.handle("whatsapp:status", () => whatsapp.status);
   ipcMain.handle("whatsapp:connect", () => whatsapp.connect());
   ipcMain.handle("whatsapp:disconnect", () => whatsapp.disconnect());
@@ -65,7 +76,8 @@ function registerIpc() {
     const source = result.filePaths[0];
     const extension = path.extname(source).toLowerCase();
     const content = fs.readFileSync(source);
-    const contacts = extension === ".csv" ? parseCsv(content.toString("utf8"), "91") : await parseWorkbook(content, "91");
+    const countryCode = String(database.getSettings().country || "91").replace(/\D/g, "");
+    const contacts = extension === ".csv" ? parseCsv(content.toString("utf8"), countryCode) : await parseWorkbook(content, countryCode);
     return contacts.map((contact) => database.addContact(contact));
   });
   ipcMain.handle("groups:list", () => database.listGroups());
@@ -77,8 +89,8 @@ function registerIpc() {
   ipcMain.handle("campaigns:list", () => database.listCampaigns());
   ipcMain.handle("dashboard:summary", () => database.getDashboardSummary());
   ipcMain.handle("campaigns:create", (_event, campaign) => database.createCampaign(campaign));
-  ipcMain.handle("campaigns:start", (_event, id) => scheduler.start(id, getCampaignSettings(id)));
-  ipcMain.handle("campaigns:resume", (_event, id) => scheduler.resume(id, getCampaignSettings(id)));
+  ipcMain.handle("campaigns:start", (_event, id) => scheduler.start(id, assertCampaignReady(id)));
+  ipcMain.handle("campaigns:resume", (_event, id) => scheduler.resume(id, assertCampaignReady(id)));
   ipcMain.handle("campaigns:pause", (_event, id) => scheduler.pause(id));
   ipcMain.handle("campaigns:stop", (_event, id) => scheduler.stop(id));
   ipcMain.handle("campaigns:duplicate", (_event, id) => database.duplicateCampaign(id));
@@ -129,6 +141,7 @@ app.whenReady().then(() => {
   scheduler = new CampaignScheduler({
     database,
     sender: (contact, settings) => whatsapp.sendMessage(contact, settings),
+    canSend: () => whatsapp.status.status === "connected",
     onProgress: (progress) => mainWindow?.webContents.send("campaign:progress", progress),
   });
   scheduler.beginPolling();

@@ -8,39 +8,64 @@ import {
   Trash2, Upload, Users, Wifi, X,
 } from "lucide-react";
 
+const mockStore = {
+  connection: { status: "disconnected" },
+  settings: {},
+  contacts: [],
+  templates: [],
+  campaigns: [],
+  media: [],
+  blacklist: [],
+};
+
+const mockSummary = () => {
+  const sent = mockStore.campaigns.reduce((total, campaign) => total + Number(campaign.sent || 0), 0);
+  const failed = mockStore.campaigns.reduce((total, campaign) => total + Number(campaign.failed || 0), 0);
+  return { contacts: mockStore.contacts.length, activeCampaigns: mockStore.campaigns.filter((campaign) => ["Running", "Paused", "Scheduled"].includes(campaign.status)).length, sent, failed, successRate: sent + failed ? Math.round((sent / (sent + failed)) * 1000) / 10 : 0, timeline: [] };
+};
+
 const api = window.wasend || {
-  getConnection: async () => ({ status: "disconnected" }),
-  connect: async () => ({ status: "waiting-for-scan" }),
-  disconnect: async () => ({ status: "disconnected" }),
-  getSettings: async () => ({}),
-  saveSettings: async () => true,
-  listContacts: async () => [],
-  addContact: async (contact) => ({ ...contact, id: Date.now() }),
-  removeContact: async () => true,
-  importContacts: async ({ content }) => content.split(/\r?\n/).map((phone, index) => ({ id: Date.now() + index, name: "", phone: phone.startsWith("+") ? phone : `+91${phone.replace(/\D/g, "")}`, tags: ["imported"], custom1: "", custom2: "" })).filter((contact) => contact.phone.length > 3),
+  getConnection: async () => mockStore.connection,
+  connect: async () => (mockStore.connection = { status: "waiting-for-scan" }),
+  disconnect: async () => (mockStore.connection = { status: "disconnected" }),
+  getSettings: async () => mockStore.settings,
+  saveSettings: async (settings) => (mockStore.settings = { ...mockStore.settings, ...settings }),
+  listContacts: async () => mockStore.contacts,
+  addContact: async (contact) => {
+    const phone = contact.phone?.startsWith("+") ? contact.phone : `+91${String(contact.phone || "").replace(/\D/g, "")}`;
+    const saved = { ...contact, phone, id: Date.now() };
+    mockStore.contacts = [saved, ...mockStore.contacts.filter((item) => item.phone !== phone)];
+    return saved;
+  },
+  removeContact: async (id) => { mockStore.contacts = mockStore.contacts.filter((contact) => contact.id !== id); return true; },
+  importContacts: async ({ content }) => {
+    const imported = content.split(/\r?\n/).map((phone, index) => ({ id: Date.now() + index, name: "", phone: phone.startsWith("+") ? phone : `+91${phone.replace(/\D/g, "")}`, tags: ["imported"], custom1: "", custom2: "" })).filter((contact) => contact.phone.length > 3);
+    mockStore.contacts = [...imported, ...mockStore.contacts];
+    return imported;
+  },
   importContactFile: async () => [],
   exportContacts: async () => true,
-  listTemplates: async () => [],
-  saveTemplate: async (template) => ({ ...template, id: Date.now() }),
-  listCampaigns: async () => [],
-  getDashboardSummary: async () => ({ contacts: 0, activeCampaigns: 0, sent: 0, failed: 0, successRate: 0, timeline: [] }),
-  createCampaign: async (campaign) => ({ ...campaign, id: Date.now() }),
-  startCampaign: async () => true,
-  resumeCampaign: async () => true,
-  pauseCampaign: async () => true,
-  stopCampaign: async () => true,
-  duplicateCampaign: async () => true,
-  removeCampaign: async () => true,
-  listMedia: async () => [],
+  listTemplates: async () => mockStore.templates,
+  saveTemplate: async (template) => { const saved = { ...template, id: Date.now() }; mockStore.templates = [saved, ...mockStore.templates]; return saved; },
+  listCampaigns: async () => mockStore.campaigns,
+  getDashboardSummary: async () => mockSummary(),
+  createCampaign: async (campaign) => { const saved = { ...campaign, id: Date.now() }; mockStore.campaigns = [saved, ...mockStore.campaigns]; return saved; },
+  startCampaign: async (id) => { mockStore.campaigns = mockStore.campaigns.map((campaign) => campaign.id === id ? { ...campaign, status: "Running" } : campaign); return true; },
+  resumeCampaign: async (id) => { mockStore.campaigns = mockStore.campaigns.map((campaign) => campaign.id === id ? { ...campaign, status: "Running" } : campaign); return true; },
+  pauseCampaign: async (id) => { mockStore.campaigns = mockStore.campaigns.map((campaign) => campaign.id === id ? { ...campaign, status: "Paused" } : campaign); return true; },
+  stopCampaign: async (id) => { mockStore.campaigns = mockStore.campaigns.map((campaign) => campaign.id === id ? { ...campaign, status: "Stopped" } : campaign); return true; },
+  duplicateCampaign: async (id) => { const campaign = mockStore.campaigns.find((item) => item.id === id); if (campaign) mockStore.campaigns = [{ ...campaign, id: Date.now(), name: `${campaign.name} copy`, status: "Draft" }, ...mockStore.campaigns]; return true; },
+  removeCampaign: async (id) => { mockStore.campaigns = mockStore.campaigns.filter((campaign) => campaign.id !== id); return true; },
+  listMedia: async () => mockStore.media,
   addMedia: async () => null,
-  listBlacklist: async () => [],
-  addBlacklist: async () => true,
-  removeBlacklist: async () => true,
-  removeTemplate: async () => true,
-  duplicateTemplate: async () => true,
+  listBlacklist: async () => mockStore.blacklist,
+  addBlacklist: async (phone, reason = "") => { mockStore.blacklist = [{ id: Date.now(), phone, reason }, ...mockStore.blacklist]; return true; },
+  removeBlacklist: async (id) => { mockStore.blacklist = mockStore.blacklist.filter((item) => item.id !== id); return true; },
+  removeTemplate: async (id) => { mockStore.templates = mockStore.templates.filter((template) => template.id !== id); return true; },
+  duplicateTemplate: async (id) => { const template = mockStore.templates.find((item) => item.id === id); if (template) mockStore.templates = [{ ...template, id: Date.now(), name: `${template.name} copy` }, ...mockStore.templates]; return true; },
   exportReportCsv: async () => true,
   exportReportPdf: async () => true,
-  resetApp: async () => true,
+  resetApp: async () => { mockStore.contacts = []; mockStore.templates = []; mockStore.campaigns = []; mockStore.media = []; mockStore.blacklist = []; return true; },
 };
 
 const nav = [
@@ -98,7 +123,7 @@ function App() {
 
   useEffect(() => {
     api.getConnection().then(recordConnectionStatus).catch(() => {});
-    if (window.wasend) api.getSettings().then((settings) => settings.reconnect !== false && api.connect().then(recordConnectionStatus)).catch(() => {});
+    if (window.wasend) api.getSettings().then((settings) => { applyTheme(settings.theme); return settings.reconnect !== false && api.connect().then(recordConnectionStatus); }).catch(() => {});
     Promise.all([api.listContacts(), api.listTemplates(), api.listCampaigns(), api.listMedia(), api.getDashboardSummary()])
       .then(([freshContacts, freshTemplates, freshCampaigns, freshMedia, freshSummary]) => {
         setContacts(freshContacts);
@@ -110,8 +135,8 @@ function App() {
       .finally(() => setLoading(false));
     const listener = (value) => recordConnectionStatus(value);
     api.onConnection?.(listener);
-    const progress = ({ campaignId, sent, total, status }) => {
-      setCampaigns((items) => items.map((campaign) => campaign.id === campaignId ? { ...campaign, sent: sent ?? campaign.sent, pending: total ? total - (sent || 0) : campaign.pending, progress: total ? Math.round(((sent || 0) / total) * 100) : campaign.progress, status } : campaign));
+    const progress = ({ campaignId, sent, failed, total, status }) => {
+      setCampaigns((items) => items.map((campaign) => campaign.id === campaignId ? { ...campaign, sent: sent ?? campaign.sent, failed: failed ?? campaign.failed, pending: total ? Math.max(total - (sent || 0) - (failed || 0), 0) : campaign.pending, progress: total ? Math.round((((sent || 0) + (failed || 0)) / total) * 100) : campaign.progress, status } : campaign));
       const priorStatus = notifiedCampaignStatuses.current.get(campaignId);
       if (status && status !== priorStatus && ["Running", "Paused", "Completed", "Failed", "Stopped"].includes(status)) {
         addNotification(`Campaign ${status.toLowerCase()}.`, status === "Completed" ? "success" : status === "Failed" ? "error" : "info");
@@ -135,8 +160,11 @@ function App() {
     setToast({ message, tone });
     window.setTimeout(() => setToast(null), 2800);
   };
+  const reportError = (error, fallback = "Something went wrong") => {
+    notify(error?.message || fallback, "error");
+  };
 
-  const context = { page, setPage, contacts, setContacts, templates, setTemplates, campaigns, setCampaigns, media, setMedia, summary, setSummary, loading, connection, setConnection, setModal, notify };
+  const context = { page, setPage, contacts, setContacts, templates, setTemplates, campaigns, setCampaigns, media, setMedia, summary, setSummary, loading, connection, setConnection, setModal, notify, reportError };
   const Page = { Dashboard, ContactsPage, TemplatesPage, CampaignsPage, MediaPage, ReportsPage, SettingsPage }[page === "Media Library" ? "MediaPage" : `${page}Page`] || Dashboard;
 
   return (
@@ -149,11 +177,11 @@ function App() {
           <Page {...context} />
         </div>
       </main>
-      {modal === "contact" && <ContactModal onClose={() => setModal(null)} onSave={async (contact) => { const saved = await api.addContact(contact); setContacts((items) => [...items.filter((item) => item.phone !== saved.phone), saved]); setSummary(await api.getDashboardSummary()); setModal(null); notify("Contact added successfully"); }} />}
-      {modal === "template" && <TemplateModal onClose={() => setModal(null)} onSave={async (template) => { const saved = await api.saveTemplate(template); setTemplates((items) => [{ ...template, id: saved.id || Date.now() }, ...items]); setModal(null); notify("Template saved"); }} />}
-      {modal === "campaign" && <CampaignWizard contacts={contacts} templates={templates} media={media} onClose={() => setModal(null)} onLaunch={async (campaign) => { const saved = await api.createCampaign(campaign); setCampaigns((items) => [{ ...campaign, id: saved.id || Date.now() }, ...items]); setSummary(await api.getDashboardSummary()); setModal(null); notify("Campaign created. Review policy limits before launch.", "warning"); }} />}
-      {modal === "import" && <ImportModal onClose={() => setModal(null)} onImport={async (payload) => { const added = await api.importContacts({ ...payload, defaultCountryCode: "91" }); setContacts(await api.listContacts()); setSummary(await api.getDashboardSummary()); setModal(null); notify(`${added.length} contacts imported`); }} onImportFile={async () => { const added = await api.importContactFile(); setContacts(await api.listContacts()); setSummary(await api.getDashboardSummary()); setModal(null); notify(`${added.length} contacts imported`); }} />}
-      {modal === "connect" && <ConnectionModal connection={connection} onClose={() => setModal(null)} onConnect={async () => recordConnectionStatus(await api.connect())} onDisconnect={async () => { await api.disconnect?.(); recordConnectionStatus({ status: "disconnected" }); setModal(null); notify("WhatsApp disconnected", "warning"); }} />}
+      {modal === "contact" && <ContactModal onClose={() => setModal(null)} onSave={async (contact) => { try { const saved = await api.addContact(contact); setContacts(await api.listContacts()); setSummary(await api.getDashboardSummary()); setModal(null); notify(saved?.id ? "Contact added successfully" : "Contact updated successfully"); } catch (error) { reportError(error, "Could not save contact"); } }} />}
+      {modal === "template" && <TemplateModal onClose={() => setModal(null)} onSave={async (template) => { try { const saved = await api.saveTemplate(template); setTemplates((items) => [{ ...template, id: saved.id || Date.now() }, ...items]); setModal(null); notify("Template saved"); } catch (error) { reportError(error, "Could not save template"); } }} />}
+      {modal === "campaign" && <CampaignWizard contacts={contacts} templates={templates} media={media} connection={connection} onClose={() => setModal(null)} onLaunch={async (campaign) => { try { const saved = await api.createCampaign(campaign); if (!campaign.scheduledAt) await api.startCampaign(saved.id); setCampaigns(await api.listCampaigns()); setSummary(await api.getDashboardSummary()); setPage("Campaigns"); setModal(null); notify(campaign.scheduledAt ? "Campaign scheduled" : "Campaign launched"); } catch (error) { reportError(error, "Could not launch campaign"); } }} />}
+      {modal === "import" && <ImportModal onClose={() => setModal(null)} onImport={async (payload) => { try { const settings = await api.getSettings(); const added = await api.importContacts({ ...payload, defaultCountryCode: String(settings.country || "91").replace(/\D/g, "") }); setContacts(await api.listContacts()); setSummary(await api.getDashboardSummary()); setModal(null); notify(`${added.length} contacts imported`); } catch (error) { reportError(error, "Could not import contacts"); } }} onImportFile={async () => { try { const added = await api.importContactFile(); setContacts(await api.listContacts()); setSummary(await api.getDashboardSummary()); setModal(null); notify(`${added.length} contacts imported`); } catch (error) { reportError(error, "Could not import contacts"); } }} />}
+      {modal === "connect" && <ConnectionModal connection={connection} onClose={() => setModal(null)} onConnect={async () => { try { recordConnectionStatus(await api.connect()); } catch (error) { reportError(error, "Could not open WhatsApp Web"); } }} onDisconnect={async () => { try { await api.disconnect?.(); recordConnectionStatus({ status: "disconnected" }); setModal(null); notify("WhatsApp disconnected", "warning"); } catch (error) { reportError(error, "Could not disconnect WhatsApp"); } }} />}
       {onboarding && <Onboarding onClose={() => setOnboarding(false)} setModal={setModal} />}
       {toast && <Toast {...toast} />}
       <button onClick={() => setOnboarding(true)} className="fixed bottom-5 right-5 flex h-10 w-10 items-center justify-center rounded-full bg-navy text-white shadow-lg transition hover:scale-105" aria-label="Open onboarding"><CircleHelp size={18} /></button>
@@ -289,17 +317,29 @@ function TemplatesPage({ templates, setTemplates, setModal, notify }) {
   </div>;
 }
 
-function CampaignsPage({ campaigns, setCampaigns, setModal, notify }) {
-  const changeStatus = async (campaign, status) => { if (status === "Running") { if (campaign.status === "Paused") await api.resumeCampaign(campaign.id); else await api.startCampaign(campaign.id); } else if (status === "Paused") await api.pauseCampaign(campaign.id); else if (status === "Stopped") await api.stopCampaign(campaign.id); setCampaigns((items) => items.map((c) => c.id === campaign.id ? { ...c, status } : c)); notify(`Campaign ${status.toLowerCase()}`); };
-  const duplicate = async (id) => { await api.duplicateCampaign(id); setCampaigns(await api.listCampaigns()); notify("Campaign duplicated as a draft"); };
-  const remove = async (id) => { if (!window.confirm("Delete this campaign and its delivery logs? This cannot be undone.")) return; await api.removeCampaign(id); setCampaigns((items) => items.filter((campaign) => campaign.id !== id)); notify("Campaign deleted", "warning"); };
+function CampaignsPage({ campaigns, setCampaigns, setModal, notify, reportError }) {
+  const changeStatus = async (campaign, status) => {
+    try {
+      if (status === "Running") {
+        if (campaign.status === "Paused") await api.resumeCampaign(campaign.id);
+        else await api.startCampaign(campaign.id);
+      } else if (status === "Paused") await api.pauseCampaign(campaign.id);
+      else if (status === "Stopped") await api.stopCampaign(campaign.id);
+      setCampaigns(await api.listCampaigns());
+      notify(`Campaign ${status.toLowerCase()}`);
+    } catch (error) {
+      reportError(error, "Could not update campaign");
+    }
+  };
+  const duplicate = async (id) => { try { await api.duplicateCampaign(id); setCampaigns(await api.listCampaigns()); notify("Campaign duplicated as a draft"); } catch (error) { reportError(error, "Could not duplicate campaign"); } };
+  const remove = async (id) => { if (!window.confirm("Delete this campaign and its delivery logs? This cannot be undone.")) return; try { await api.removeCampaign(id); setCampaigns((items) => items.filter((campaign) => campaign.id !== id)); notify("Campaign deleted", "warning"); } catch (error) { reportError(error, "Could not delete campaign"); } };
   return <div><div className="mb-5 flex items-center justify-between"><p className="text-sm text-slate-500">Review, schedule, and monitor opted-in campaign sends.</p><button onClick={() => setModal("campaign")} className="btn-primary"><Plus size={16} /> New Campaign</button></div>
     <section className="panel overflow-hidden"><div className="flex items-center justify-between border-b border-slate-100 p-4"><SearchBox placeholder="Search campaigns" /><button className="btn-secondary"><ListFilter size={15} /> All statuses</button></div>{campaigns.length ? <CampaignTable campaigns={campaigns} actions changeStatus={changeStatus} duplicate={duplicate} remove={remove} /> : <EmptyState icon={Megaphone} title="No campaigns yet" text="Create a campaign after importing opted-in contacts and a message template." />}</section>
   </div>;
 }
 
 function CampaignTable({ campaigns, compact, actions, changeStatus, duplicate, remove }) {
-  return <table className="w-full"><thead className="border-b border-slate-100 bg-slate-50"><tr>{["Campaign", "Status", "Recipients", "Progress", "Sent date", actions ? "Actions" : ""].map((h) => <th key={h} className="table-head px-4 py-3">{h}</th>)}</tr></thead><tbody>{campaigns.map((c) => <tr key={c.id} className="border-b border-slate-100 text-xs hover:bg-slate-50/70"><td className="px-4 py-3 font-semibold text-slate-700">{c.name}</td><td className="px-4 py-3"><Status value={c.status} /></td><td className="px-4 py-3 text-slate-500">{c.total}</td><td className="px-4 py-3"><div className="flex items-center gap-2"><div className="h-1.5 w-20 rounded-full bg-slate-100"><div className="h-full rounded-full bg-emerald" style={{ width: `${c.progress}%` }} /></div><span className="text-[11px] text-slate-400">{c.progress}%</span></div></td><td className="px-4 py-3 text-slate-500">{formatDate(c.date)}</td>{actions && <td className="px-4 py-3"><div className="flex gap-2">{c.status === "Running" ? <button onClick={() => changeStatus(c, "Paused")} className="text-amber-600" aria-label="Pause campaign"><Pause size={15} /></button> : <button onClick={() => changeStatus(c, "Running")} className="text-emerald" aria-label={c.status === "Paused" ? "Resume campaign" : "Start campaign"}><Play size={15} /></button>}<button onClick={() => changeStatus(c, "Stopped")} className="text-slate-400 hover:text-rose-500" aria-label="Stop campaign"><Square size={14} /></button><button onClick={() => duplicate(c.id)} className="text-slate-400 hover:text-emerald" aria-label="Duplicate campaign"><Copy size={14} /></button><button onClick={() => remove(c.id)} className="text-slate-400 hover:text-rose-500" aria-label="Delete campaign"><Trash2 size={14} /></button></div></td>}</tr>)}</tbody></table>;
+  return <table className="w-full"><thead className="border-b border-slate-100 bg-slate-50"><tr>{["Campaign", "Status", "Recipients", "Progress", "Sent date", actions ? "Actions" : ""].map((h) => <th key={h} className="table-head px-4 py-3">{h}</th>)}</tr></thead><tbody>{campaigns.map((c) => <tr key={c.id} className="border-b border-slate-100 text-xs hover:bg-slate-50/70"><td className="px-4 py-3 font-semibold text-slate-700">{c.name}</td><td className="px-4 py-3"><Status value={c.status} /></td><td className="px-4 py-3 text-slate-500">{c.total}</td><td className="px-4 py-3"><div className="flex items-center gap-2"><div className="h-1.5 w-20 rounded-full bg-slate-100"><div className="h-full rounded-full bg-emerald" style={{ width: `${c.progress}%` }} /></div><span className="text-[11px] text-slate-400">{c.progress}%</span></div></td><td className="px-4 py-3 text-slate-500">{formatDate(c.date)}</td>{actions && <td className="px-4 py-3"><div className="flex gap-2">{c.status === "Running" ? <button onClick={() => changeStatus(c, "Paused")} className="text-amber-600" aria-label="Pause campaign"><Pause size={15} /></button> : <button onClick={() => changeStatus(c, "Running")} className="text-emerald" aria-label={c.status === "Paused" ? "Resume campaign" : "Start campaign"}><Play size={15} /></button>}{["Running", "Paused", "CoolingDown"].includes(c.status) && <button onClick={() => changeStatus(c, "Stopped")} className="text-slate-400 hover:text-rose-500" aria-label="Stop campaign"><Square size={14} /></button>}<button onClick={() => duplicate(c.id)} className="text-slate-400 hover:text-emerald" aria-label="Duplicate campaign"><Copy size={14} /></button><button onClick={() => remove(c.id)} className="text-slate-400 hover:text-rose-500" aria-label="Delete campaign"><Trash2 size={14} /></button></div></td>}</tr>)}</tbody></table>;
 }
 
 function MediaPage({ media, setMedia, notify }) {
@@ -313,12 +353,14 @@ function ReportsPage({ campaigns, summary }) {
 }
 
 function SettingsPage({ notify }) {
-  const [settings, setSettings] = useState({ minDelay: 8, maxDelay: 15, batch: 40, pause: 5, retries: 1, country: "+91", reconnect: true, sounds: true, maxSession: 500 });
+  const defaults = { minDelay: 8, maxDelay: 15, batch: 40, pause: 5, retries: 1, country: "+91", timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, theme: "light", reconnect: true, sounds: true, maxSession: 500 };
+  const [settings, setSettings] = useState(defaults);
   const [blacklist, setBlacklist] = useState([]);
   const [blockedPhone, setBlockedPhone] = useState("");
-  useEffect(() => { api.listBlacklist().then(setBlacklist).catch(() => {}); }, []);
+  useEffect(() => { Promise.all([api.getSettings(), api.listBlacklist()]).then(([saved, blocked]) => { setSettings({ ...defaults, ...saved }); setBlacklist(blocked); }).catch(() => {}); }, []);
+  useEffect(() => { applyTheme(settings.theme); }, [settings.theme]);
   const update = (key, value) => setSettings((current) => ({ ...current, [key]: value }));
-  return <div className="grid grid-cols-[1fr_290px] gap-5"><section className="panel divide-y divide-slate-100"><div className="p-5"><SectionTitle title="Sending limits" sub="Use conservative limits and send only to opted-in contacts." /><div className="mt-5 grid grid-cols-3 gap-4"><SettingInput label="Minimum delay (sec)" value={settings.minDelay} onChange={(v) => update("minDelay", v)} /><SettingInput label="Maximum delay (sec)" value={settings.maxDelay} onChange={(v) => update("maxDelay", v)} /><SettingInput label="Max messages / session" value={settings.maxSession} onChange={(v) => update("maxSession", v)} /><SettingInput label="Batch size" value={settings.batch} onChange={(v) => update("batch", v)} /><SettingInput label="Pause between batches (min)" value={settings.pause} onChange={(v) => update("pause", v)} /><SettingInput label="Retry failed messages" value={settings.retries} onChange={(v) => update("retries", v)} /></div></div><div className="p-5"><SectionTitle title="Application preferences" /><div className="mt-4 space-y-4"><Toggle label="Auto-reconnect WhatsApp Web session" value={settings.reconnect} setValue={(v) => update("reconnect", v)} /><Toggle label="Play notification sound when a campaign completes" value={settings.sounds} setValue={(v) => update("sounds", v)} /></div></div><div className="p-5"><button onClick={() => { api.saveSettings(settings); notify("Settings saved"); }} className="btn-primary">Save settings</button></div></section><aside className="space-y-4"><section className="panel p-5"><h2 className="text-sm font-bold text-ink">Do-not-contact list</h2><p className="mt-2 text-xs leading-5 text-slate-500">Blocked numbers are skipped in every campaign.</p><div className="mt-3 flex gap-2"><input value={blockedPhone} onChange={(e) => setBlockedPhone(e.target.value)} className="input py-2" placeholder="+91..." /><button onClick={async () => { await api.addBlacklist(blockedPhone, "Manual block"); setBlacklist(await api.listBlacklist()); setBlockedPhone(""); notify("Number blocked"); }} className="btn-secondary">Add</button></div><p className="mt-3 text-[11px] text-slate-400">{blacklist.length} blocked numbers</p></section><section className="panel border-rose-200 p-5"><h2 className="text-sm font-bold text-rose-700">Danger zone</h2><p className="mt-2 text-xs leading-5 text-slate-500">Clear local campaign data or reset this application. This cannot be undone.</p><button onClick={async () => { if (window.confirm("Clear all WASend data? This cannot be undone.")) { await api.resetApp(); window.location.reload(); } }} className="mt-4 rounded-lg border border-rose-200 px-3 py-2 text-xs font-bold text-rose-600 hover:bg-rose-50">Reset application</button></section></aside></div>;
+  return <div className="grid grid-cols-[1fr_310px] gap-5"><section className="panel divide-y divide-slate-100"><div className="p-5"><SectionTitle title="Sending limits" sub="Use conservative limits and send only to opted-in contacts." /><div className="mt-5 grid grid-cols-3 gap-4"><SettingInput label="Minimum delay (sec)" value={settings.minDelay} onChange={(v) => update("minDelay", v)} /><SettingInput label="Maximum delay (sec)" value={settings.maxDelay} onChange={(v) => update("maxDelay", v)} /><SettingInput label="Max messages / session" value={settings.maxSession} onChange={(v) => update("maxSession", v)} /><SettingInput label="Batch size" value={settings.batch} onChange={(v) => update("batch", v)} /><SettingInput label="Pause between batches (min)" value={settings.pause} onChange={(v) => update("pause", v)} /><SettingInput label="Retry failed messages" value={settings.retries} onChange={(v) => update("retries", v)} /></div></div><div className="p-5"><SectionTitle title="Application preferences" /><div className="mt-4 grid grid-cols-3 gap-4"><SelectField label="Default country code" value={settings.country} onChange={(v) => update("country", v)} options={[["+91", "India (+91)"], ["+1", "United States (+1)"], ["+44", "United Kingdom (+44)"], ["+971", "UAE (+971)"], ["+61", "Australia (+61)"], ["+65", "Singapore (+65)"]]} /><SelectField label="Timezone" value={settings.timezone} onChange={(v) => update("timezone", v)} options={timezoneOptions(settings.timezone).map((item) => [item, item])} /><SelectField label="App theme" value={settings.theme} onChange={(v) => update("theme", v)} options={[["light", "Light"], ["dark", "Dark"]]} /></div><div className="mt-5 space-y-4"><Toggle label="Auto-reconnect WhatsApp Web session" value={settings.reconnect} setValue={(v) => update("reconnect", v)} /><Toggle label="Play notification sound when a campaign completes" value={settings.sounds} setValue={(v) => update("sounds", v)} /></div></div><div className="p-5"><button onClick={async () => { setSettings({ ...defaults, ...await api.saveSettings(settings) }); notify("Settings saved"); }} className="btn-primary">Save settings</button></div></section><aside className="space-y-4"><section className="panel p-5"><h2 className="text-sm font-bold text-ink">Do-not-contact list</h2><p className="mt-2 text-xs leading-5 text-slate-500">Blocked numbers are skipped in every campaign.</p><div className="mt-3 flex gap-2"><input value={blockedPhone} onChange={(e) => setBlockedPhone(e.target.value)} className="input py-2" placeholder="+91..." /><button onClick={async () => { await api.addBlacklist(blockedPhone, "Manual block"); setBlacklist(await api.listBlacklist()); setBlockedPhone(""); notify("Number blocked"); }} className="btn-secondary">Add</button></div>{blacklist.length ? <div className="mt-3 max-h-44 space-y-2 overflow-auto">{blacklist.map((item) => <div key={item.id} className="flex items-center justify-between rounded-lg bg-slate-50 px-2.5 py-2"><span className="truncate text-[11px] font-semibold text-slate-600">{item.phone}</span><button onClick={async () => { await api.removeBlacklist(item.id); setBlacklist((items) => items.filter((entry) => entry.id !== item.id)); notify("Number removed from do-not-contact list"); }} className="text-slate-400 hover:text-rose-500" aria-label={`Remove ${item.phone} from blacklist`}><X size={13} /></button></div>)}</div> : <p className="mt-3 text-[11px] text-slate-400">No blocked numbers</p>}</section><section className="panel border-rose-200 p-5"><h2 className="text-sm font-bold text-rose-700">Danger zone</h2><p className="mt-2 text-xs leading-5 text-slate-500">Clear local campaign data or reset this application. This cannot be undone.</p><button onClick={async () => { if (window.confirm("Clear all WASend data? This cannot be undone.")) { await api.resetApp(); window.location.reload(); } }} className="mt-4 rounded-lg border border-rose-200 px-3 py-2 text-xs font-bold text-rose-600 hover:bg-rose-50">Reset application</button></section></aside></div>;
 }
 
 function ContactModal({ onClose, onSave }) {
@@ -338,18 +380,47 @@ function ImportModal({ onClose, onImport, onImportFile }) {
   return <Modal title="Import contacts" sub="Choose a file, paste phone numbers, or import a public Google Sheet." onClose={onClose}><div className="grid grid-cols-3 gap-3"><button onClick={onImportFile} className="btn-secondary justify-center py-3"><Upload size={16} /> CSV / Excel</button><button onClick={() => setMode("paste")} className={cx("btn-secondary justify-center py-3", mode === "paste" && "border-emerald bg-emerald-50")}><FileText size={16} /> Paste numbers</button><button onClick={() => setMode("sheets")} className={cx("btn-secondary justify-center py-3", mode === "sheets" && "border-emerald bg-emerald-50")}><File size={16} /> Sheets URL</button></div><label className="label mt-4">{mode === "sheets" ? "Public Google Sheets URL" : "Paste phone numbers"}</label>{mode === "sheets" ? <input value={raw} onChange={(e) => setRaw(e.target.value)} className="input" placeholder="https://docs.google.com/spreadsheets/d/..." /> : <textarea value={raw} onChange={(e) => setRaw(e.target.value)} className="input h-36 resize-none" placeholder={"9876543210\n9123456780"} />}<p className="mt-2 text-xs text-slate-400">{mode === "sheets" ? "The sheet needs public link sharing and name / phone columns." : `${imported.length} rows detected. Duplicates will be updated.`}</p><ModalFooter onClose={onClose} onSave={() => onImport({ type: mode, content: raw })} label="Import contacts" /></Modal>;
 }
 
-function CampaignWizard({ contacts, templates, media, onClose, onLaunch }) {
+function CampaignWizard({ contacts, templates, media, connection, onClose, onLaunch }) {
   const [step, setStep] = useState(1);
-  const [form, setForm] = useState({ name: "", templateId: templates[0]?.id, total: contacts.length, delay: "8–15 seconds", consent: false, mediaPath: "", scheduledAt: "", recurrence: "none", typingSimulation: false });
+  const [form, setForm] = useState({ name: "", templateId: templates[0]?.id || "", total: contacts.length, delay: "8-15 seconds", consent: false, mediaPath: "", scheduledAt: "", recurrence: "none", typingSimulation: false });
   const steps = ["Name", "Contacts", "Message", "Attachment", "Settings", "Review"];
+  const selectedTemplate = templates.find((template) => String(template.id) === String(form.templateId));
+  const scheduledDate = form.scheduledAt ? new Date(form.scheduledAt) : null;
+  const hasValidSchedule = !form.scheduledAt || !Number.isNaN(scheduledDate.getTime());
+  const isScheduled = Boolean(form.scheduledAt && hasValidSchedule);
+  const issues = [
+    contacts.length === 0 && "Add at least one opted-in contact.",
+    templates.length === 0 && "Create a message template.",
+    !selectedTemplate && templates.length > 0 && "Select a message template.",
+    !hasValidSchedule && "Choose a valid schedule date and time.",
+    !isScheduled && connection.status !== "connected" && "Connect WhatsApp Web before launching.",
+    !form.consent && "Confirm recipient consent.",
+  ].filter(Boolean);
+  const canSubmit = issues.length === 0;
+  const submitCampaign = () => {
+    if (!canSubmit) return;
+    onLaunch({
+      name: form.name || "Untitled campaign",
+      status: isScheduled ? "Scheduled" : "Draft",
+      templateId: form.templateId,
+      scheduledAt: isScheduled ? scheduledDate.toISOString() : null,
+      settings: { mediaPath: form.mediaPath, recurrence: form.recurrence, typingSimulation: form.typingSimulation },
+      total: contacts.length,
+      sent: 0,
+      failed: 0,
+      pending: contacts.length,
+      progress: 0,
+      date: form.scheduledAt || "Not launched",
+    });
+  };
   return <Modal wide title="Create campaign" sub="Build a careful, opt-in send in six steps." onClose={onClose}><div className="mb-6 flex items-center">{steps.map((label, i) => <div key={label} className="flex flex-1 items-center"><div className={cx("flex h-7 w-7 items-center justify-center rounded-full text-[11px] font-bold", step >= i + 1 ? "bg-emerald text-white" : "bg-slate-100 text-slate-400")}>{step > i + 1 ? <Check size={14} /> : i + 1}</div><span className="ml-2 text-[11px] font-semibold text-slate-500">{label}</span>{i < 5 && <div className="mx-2 h-px flex-1 bg-slate-200" />}</div>)}</div>
     <div className="min-h-[210px]">{step === 1 && <div><h3 className="text-sm font-bold">Name your campaign</h3><p className="mt-1 text-xs text-slate-500">Use a descriptive internal name for your records.</p><div className="mt-5 max-w-md"><Field label="Campaign name" value={form.name} onChange={(name) => setForm({ ...form, name })} placeholder="e.g. June customer update" /></div></div>}
       {step === 2 && <WizardChoice title="Choose recipients" text={`${contacts.length} opted-in contacts currently available`} icon={Users} />}
-      {step === 3 && <div><h3 className="text-sm font-bold">Select a message template</h3><div className="mt-4 grid grid-cols-2 gap-3">{templates.map((t) => <button key={t.id} onClick={() => setForm({ ...form, templateId: t.id })} className={cx("rounded-lg border p-3 text-left text-xs", form.templateId === t.id ? "border-emerald bg-emerald-50" : "border-slate-200")}><b>{t.name}</b><p className="mt-2 line-clamp-2 text-slate-500">{t.body}</p></button>)}</div></div>}
+      {step === 3 && <div><h3 className="text-sm font-bold">Select a message template</h3>{templates.length ? <div className="mt-4 grid grid-cols-2 gap-3">{templates.map((t) => <button key={t.id} onClick={() => setForm({ ...form, templateId: t.id })} className={cx("rounded-lg border p-3 text-left text-xs", String(form.templateId) === String(t.id) ? "border-emerald bg-emerald-50" : "border-slate-200")}><b>{t.name}</b><p className="mt-2 line-clamp-2 whitespace-pre-line text-slate-500">{t.body}</p></button>)}</div> : <EmptyState icon={MessageSquareText} title="No templates yet" text="Create a reusable message template before launching a campaign." compact />}</div>}
       {step === 4 && <div><h3 className="text-sm font-bold">Attachment is optional</h3><p className="mt-1 text-xs text-slate-500">Choose one reusable file or continue without an attachment.</p><div className="mt-4 grid grid-cols-3 gap-3"><button onClick={() => setForm({ ...form, mediaPath: "" })} className={cx("rounded-lg border p-3 text-left text-xs", !form.mediaPath ? "border-emerald bg-emerald-50" : "border-slate-200")}><b>No attachment</b></button>{media.slice(0, 5).map((file) => <button key={file.id} onClick={() => setForm({ ...form, mediaPath: file.filepath || file.name })} className={cx("truncate rounded-lg border p-3 text-left text-xs", form.mediaPath === (file.filepath || file.name) ? "border-emerald bg-emerald-50" : "border-slate-200")}><b>{file.filename || file.name}</b></button>)}</div></div>}
       {step === 5 && <div><h3 className="text-sm font-bold">Sending settings</h3><div className="mt-4 grid grid-cols-3 gap-3"><Metric label="Pacing" value={form.delay} /><Metric label="Batch size" value="40" /><Metric label="Session cap" value="500" /></div><div className="mt-4 grid grid-cols-2 gap-3"><label><span className="label">Schedule start (optional)</span><input type="datetime-local" value={form.scheduledAt} onChange={(e) => setForm({ ...form, scheduledAt: e.target.value })} className="input" /></label><label><span className="label">Repeat</span><select value={form.recurrence} onChange={(e) => setForm({ ...form, recurrence: e.target.value })} className="input"><option value="none">Do not repeat</option><option value="daily">Daily</option><option value="weekly">Weekly</option></select></label></div><label className="mt-4 flex items-center gap-2 text-xs text-slate-600"><input type="checkbox" checked={form.typingSimulation} onChange={(e) => setForm({ ...form, typingSimulation: e.target.checked })} className="accent-emerald" /> Add a short typing pause before sending</label></div>}
-      {step === 6 && <div><h3 className="text-sm font-bold">Review and confirm</h3><div className="mt-4 rounded-lg bg-slate-50 p-4 text-xs text-slate-600"><div className="grid grid-cols-2 gap-3"><span>Campaign <b className="block text-slate-800">{form.name || "Untitled campaign"}</b></span><span>Recipients <b className="block text-slate-800">{contacts.length} contacts</b></span></div><label className="mt-5 flex items-start gap-2"><input type="checkbox" checked={form.consent} onChange={(e) => setForm({ ...form, consent: e.target.checked })} className="mt-0.5 accent-emerald" /><span>I confirm these recipients opted in and this send complies with applicable policies.</span></label></div></div>}</div>
-    <div className="mt-6 flex justify-between border-t border-slate-100 pt-4"><button onClick={step === 1 ? onClose : () => setStep(step - 1)} className="btn-secondary">{step === 1 ? "Cancel" : "Back"}</button><button onClick={() => step === 6 ? form.consent && onLaunch({ name: form.name || "Untitled campaign", status: form.scheduledAt ? "Scheduled" : "Draft", templateId: form.templateId, scheduledAt: form.scheduledAt ? new Date(form.scheduledAt).toISOString() : null, settings: { mediaPath: form.mediaPath, recurrence: form.recurrence, typingSimulation: form.typingSimulation }, total: contacts.length, sent: 0, failed: 0, pending: contacts.length, progress: 0, date: form.scheduledAt || "Not launched" }) : setStep(step + 1)} className={cx("btn-primary", step === 6 && !form.consent && "cursor-not-allowed opacity-50")}>{step === 6 ? "Create draft" : "Continue"} <ChevronRight size={15} /></button></div>
+      {step === 6 && <div><h3 className="text-sm font-bold">Review and confirm</h3><div className="mt-4 rounded-lg bg-slate-50 p-4 text-xs text-slate-600"><div className="grid grid-cols-2 gap-3"><span>Campaign <b className="block text-slate-800">{form.name || "Untitled campaign"}</b></span><span>Recipients <b className="block text-slate-800">{contacts.length} contacts</b></span><span>Message <b className="block text-slate-800">{selectedTemplate?.name || "No template selected"}</b></span><span>Start <b className="block text-slate-800">{isScheduled ? formatDate(form.scheduledAt) : "Launch now"}</b></span></div><label className="mt-5 flex items-start gap-2"><input type="checkbox" checked={form.consent} onChange={(e) => setForm({ ...form, consent: e.target.checked })} className="mt-0.5 accent-emerald" /><span>I confirm these recipients opted in and this send complies with applicable policies.</span></label>{issues.length > 0 && <div className="mt-4 rounded-lg bg-amber-50 px-3 py-2 text-amber-800">{issues[0]}</div>}</div></div>}</div>
+    <div className="mt-6 flex justify-between border-t border-slate-100 pt-4"><button onClick={step === 1 ? onClose : () => setStep(step - 1)} className="btn-secondary">{step === 1 ? "Cancel" : "Back"}</button><button onClick={() => step === 6 ? submitCampaign() : setStep(step + 1)} disabled={step === 6 && !canSubmit} className={cx("btn-primary", step === 6 && !canSubmit && "cursor-not-allowed opacity-50")}>{step === 6 ? (isScheduled ? "Schedule campaign" : "Launch campaign") : "Continue"} <ChevronRight size={15} /></button></div>
   </Modal>;
 }
 
@@ -372,17 +443,20 @@ function SectionTitle({ title, sub, action }) { return <div className="flex item
 function SearchBox({ value = "", setValue = () => {}, placeholder }) { return <label className="relative block w-72"><Search size={15} className="absolute left-3 top-2.5 text-slate-400" /><input className="input py-2 pl-9" value={value} onChange={(e) => setValue(e.target.value)} placeholder={placeholder} /></label>; }
 function Field({ label, value, onChange, placeholder }) { return <label><span className="label">{label}</span><input className="input" value={value} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} /></label>; }
 function SettingInput({ label, value, onChange }) { return <Field label={label} value={value} onChange={onChange} />; }
+function SelectField({ label, value, onChange, options }) { return <label><span className="label">{label}</span><select className="input" value={value} onChange={(event) => onChange(event.target.value)}>{options.map(([optionValue, optionLabel]) => <option key={optionValue} value={optionValue}>{optionLabel}</option>)}</select></label>; }
 function Toggle({ label, value, setValue }) { return <label className="flex items-center justify-between text-sm text-slate-600"><span>{label}</span><button type="button" onClick={() => setValue(!value)} className={cx("relative h-6 w-11 rounded-full transition", value ? "bg-emerald" : "bg-slate-200")}><span className={cx("absolute top-1 h-4 w-4 rounded-full bg-white transition", value ? "left-6" : "left-1")} /></button></label>; }
-function Status({ value }) { const colors = { Completed: "bg-emerald-50 text-emerald-700", Running: "bg-sky-50 text-sky-700", Scheduled: "bg-violet-50 text-violet-700", Paused: "bg-amber-50 text-amber-700", Draft: "bg-slate-100 text-slate-600", Stopped: "bg-rose-50 text-rose-600" }; return <span className={cx("rounded-full px-2 py-1 text-[10px] font-bold", colors[value] || colors.Draft)}>{value}</span>; }
+function Status({ value }) { const colors = { Completed: "bg-emerald-50 text-emerald-700", Running: "bg-sky-50 text-sky-700", CoolingDown: "bg-cyan-50 text-cyan-700", Scheduled: "bg-violet-50 text-violet-700", Paused: "bg-amber-50 text-amber-700", Draft: "bg-slate-100 text-slate-600", Stopped: "bg-rose-50 text-rose-600", Failed: "bg-rose-50 text-rose-600" }; return <span className={cx("rounded-full px-2 py-1 text-[10px] font-bold", colors[value] || colors.Draft)}>{value}</span>; }
 function Avatar({ name }) { return <span className="flex h-7 w-7 items-center justify-center rounded-full bg-sky-100 text-[10px] font-bold text-sky-700">{initials(name)}</span>; }
 function Tag({ children }) { return <span className="rounded bg-slate-100 px-1.5 py-1 text-[10px] font-semibold text-slate-500">{children}</span>; }
 function QueueItem({ name, time, count }) { return <div className="rounded-lg border border-slate-100 p-3"><div className="text-xs font-bold text-slate-700">{name}</div><div className="mt-2 flex items-center gap-1 text-[10px] text-slate-400"><Clock3 size={11} /> {time}</div><div className="mt-1 text-[10px] text-slate-400">{count}</div></div>; }
 function Metric({ label, value }) { return <div className="rounded-lg border border-slate-100 bg-slate-50 p-3"><p className="text-[11px] font-medium text-slate-400">{label}</p><p className="mt-1 text-lg font-bold text-ink">{value}</p></div>; }
 function WizardChoice({ title, text, icon: Icon, secondary }) { return <div><h3 className="text-sm font-bold">{title}</h3><button className="mt-4 flex w-full items-center gap-4 rounded-xl border border-emerald bg-emerald-50 p-4 text-left"><span className="flex h-10 w-10 items-center justify-center rounded-lg bg-white text-emerald"><Icon size={19} /></span><span><b className="block text-sm text-slate-700">{text}</b>{secondary && <small className="mt-1 block text-slate-500">{secondary}</small>}</span><CheckCircle2 className="ml-auto text-emerald" size={18} /></button></div>; }
-function Toast({ message, tone }) { return <div className={cx("fixed bottom-5 left-1/2 z-[70] flex -translate-x-1/2 items-center gap-2 rounded-lg px-4 py-3 text-xs font-semibold text-white shadow-lg", tone === "warning" ? "bg-amber-600" : "bg-slate-800")}>{tone === "warning" ? <AlertTriangle size={15} /> : <CheckCircle2 size={15} className="text-emerald-300" />}{message}</div>; }
+function Toast({ message, tone }) { const error = tone === "error"; return <div className={cx("fixed bottom-5 left-1/2 z-[70] flex -translate-x-1/2 items-center gap-2 rounded-lg px-4 py-3 text-xs font-semibold text-white shadow-lg", error ? "bg-rose-600" : tone === "warning" ? "bg-amber-600" : "bg-slate-800")}>{error || tone === "warning" ? <AlertTriangle size={15} /> : <CheckCircle2 size={15} className="text-emerald-300" />}{message}</div>; }
 function EmptyState({ icon: Icon, title, text, compact }) { return <div className={cx("flex flex-col items-center justify-center px-5 text-center", compact ? "min-h-28 py-5" : "min-h-56 py-10")}><span className="flex h-10 w-10 items-center justify-center rounded-full bg-slate-100 text-slate-400"><Icon size={18} /></span><h3 className="mt-3 text-sm font-bold text-slate-700">{title}</h3><p className="mt-1 max-w-xs text-xs leading-5 text-slate-400">{text}</p></div>; }
-function formatDate(value) { return value ? new Date(value).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "Not scheduled"; }
+function formatDate(value) { const date = value ? new Date(value) : null; return date && !Number.isNaN(date.getTime()) ? date.toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "Not launched"; }
 function formatNotificationTime(value) { return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
+function timezoneOptions(current) { return [...new Set([current, "Asia/Kolkata", "UTC", "America/New_York", "Europe/London", "Asia/Dubai", "Asia/Singapore", "Australia/Sydney"].filter(Boolean))]; }
+function applyTheme(theme = "light") { document.documentElement.dataset.theme = theme; }
 function lastSevenDays(timeline = []) {
   const counts = new Map(timeline.map((item) => [item.day, Number(item.sent || 0)]));
   return Array.from({ length: 7 }, (_item, index) => {

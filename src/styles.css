@@ -24,3 +24,24 @@
   .label { @apply mb-1.5 block text-xs font-semibold uppercase tracking-wide text-slate-500; }
   .table-head { @apply text-left text-[11px] font-semibold uppercase tracking-wide text-slate-400; }
 }
+
+@layer base {
+  [data-theme="dark"] body,
+  [data-theme="dark"] .bg-mist { background: #071427; color: #dbe7f5; }
+  [data-theme="dark"] header,
+  [data-theme="dark"] .panel,
+  [data-theme="dark"] .bg-white { background-color: #10223a; border-color: #263b55; }
+  [data-theme="dark"] .bg-slate-50,
+  [data-theme="dark"] .bg-slate-100 { background-color: #172d49; }
+  [data-theme="dark"] .border-slate-100,
+  [data-theme="dark"] .border-slate-200 { border-color: #263b55; }
+  [data-theme="dark"] .text-ink,
+  [data-theme="dark"] .text-slate-800,
+  [data-theme="dark"] .text-slate-700,
+  [data-theme="dark"] .text-slate-600 { color: #dbe7f5; }
+  [data-theme="dark"] .text-slate-500,
+  [data-theme="dark"] .text-slate-400 { color: #9cb0c9; }
+  [data-theme="dark"] .input,
+  [data-theme="dark"] .btn-secondary { background: #172d49; border-color: #36506e; color: #dbe7f5; }
+  [data-theme="dark"] .btn-secondary:hover { background: #203956; }
+}
