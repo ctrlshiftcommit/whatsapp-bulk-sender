@@ -12,13 +12,25 @@ class WhatsAppSession {
     this.status = { status: "disconnected" };
     this.browser = null;
     this.page = null;
+    this.connecting = null;
+    this.watching = false;
   }
 
   async connect() {
+    if (this.connecting) return this.connecting;
     if (this.browser) {
-      if (this.page && !this.page.isClosed()) await this.page.bringToFront();
+      await this.preparePage();
       return this.status;
     }
+    this.connecting = this.open();
+    try {
+      return await this.connecting;
+    } finally {
+      this.connecting = null;
+    }
+  }
+
+  async open() {
     this.update({ status: "opening-browser" });
     try {
       this.browser = await this.attachExistingBrowser().catch(() => null);
@@ -32,6 +44,11 @@ class WhatsAppSession {
               "--no-sandbox",
               "--disable-setuid-sandbox",
               "--disable-infobars",
+              "--disable-extensions",
+              "--disable-sync",
+              "--disable-component-update",
+              "--disable-features=Translate,MediaRouter,OptimizationHints,AutofillServerCommunication",
+              "--process-per-site",
               "--window-size=1280,800",
               "--window-position=100,100",
             ],
@@ -44,7 +61,7 @@ class WhatsAppSession {
       }
       await this.preparePage();
       this.update({ status: "waiting-for-scan" });
-      this.watch().catch((error) => this.update({ status: "disconnected", error: error.message }));
+      this.startWatching();
       return this.status;
     } catch (error) {
       this.browser = null;
@@ -76,13 +93,16 @@ class WhatsAppSession {
   }
 
   async preparePage() {
-    this.browser.on("disconnected", () => {
+    if (this.handleDisconnected) this.browser.off?.("disconnected", this.handleDisconnected);
+    this.handleDisconnected = () => {
       this.browser = null;
       this.page = null;
+      this.watching = false;
       this.update({ status: "disconnected" });
-    });
+    };
+    this.browser.on("disconnected", this.handleDisconnected);
     const pages = await this.browser.pages();
-    this.page = pages.find((page) => page.url().includes("web.whatsapp.com")) || pages[0] || await this.browser.newPage();
+    this.page = await this.pickSingleWhatsAppPage(pages);
     await this.page.bringToFront();
     if (!this.page.url().includes("web.whatsapp.com")) {
       try {
@@ -97,6 +117,32 @@ class WhatsAppSession {
       }
     }
     await this.useHereIfNeeded();
+    await this.closeExtraPages();
+  }
+
+  async pickSingleWhatsAppPage(pages = []) {
+    const whatsappPages = pages.filter((page) => page.url().includes("web.whatsapp.com"));
+    const usableWhatsApp = [];
+    for (const page of whatsappPages) {
+      const body = await page.evaluate(() => document.body?.innerText || "").catch(() => "");
+      if (!/open in another window/i.test(body)) usableWhatsApp.push(page);
+    }
+    if (usableWhatsApp[0]) return usableWhatsApp[0];
+    if (whatsappPages[0]) return whatsappPages[0];
+    const blank = pages.find((page) => page.url() === "about:blank");
+    return blank || await this.browser.newPage();
+  }
+
+  async closeExtraPages() {
+    if (!this.browser || !this.page) return;
+    const pages = await this.browser.pages();
+    for (const page of pages) {
+      if (page === this.page) continue;
+      const url = page.url();
+      if (url === "about:blank" || url.includes("web.whatsapp.com")) {
+        await page.close().catch(() => {});
+      }
+    }
   }
 
   async useHereIfNeeded() {
@@ -115,6 +161,12 @@ class WhatsAppSession {
     }
   }
 
+  startWatching() {
+    if (this.watching) return;
+    this.watching = true;
+    this.watch().catch((error) => this.update({ status: "disconnected", error: error.message }));
+  }
+
   async watch() {
     while (this.page && !this.page.isClosed()) {
       try {
@@ -126,6 +178,7 @@ class WhatsAppSession {
       }
       await wait(2500);
     }
+    this.watching = false;
   }
 
   async disconnect() {

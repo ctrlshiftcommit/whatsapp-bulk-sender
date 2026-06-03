@@ -102,7 +102,15 @@ class WasendDatabase {
   }
 
   listContacts() {
-    return this.all("SELECT * FROM contacts ORDER BY created_at DESC").map((row) => ({ ...row, tags: JSON.parse(row.tags || "[]") }));
+    return this.all(`
+      SELECT contacts.*,
+        COALESCE(json_group_array(json_object('id', contact_groups.id, 'name', contact_groups.name)) FILTER (WHERE contact_groups.id IS NOT NULL), '[]') AS groups_json
+      FROM contacts
+      LEFT JOIN contact_group_members ON contact_group_members.contact_id = contacts.id
+      LEFT JOIN contact_groups ON contact_groups.id = contact_group_members.group_id
+      GROUP BY contacts.id
+      ORDER BY contacts.created_at DESC
+    `).map((row) => ({ ...row, tags: JSON.parse(row.tags || "[]"), groups: JSON.parse(row.groups_json || "[]") }));
   }
 
   addContact(contact) {
@@ -112,7 +120,10 @@ class WasendDatabase {
       "INSERT INTO contacts(name, phone, tags, custom1, custom2) VALUES (?, ?, ?, ?, ?) ON CONFLICT(phone) DO UPDATE SET name=excluded.name, tags=excluded.tags, custom1=excluded.custom1, custom2=excluded.custom2",
       [contact.name || "", phone, JSON.stringify(contact.tags || []), contact.custom1 || "", contact.custom2 || ""],
     );
-    return { id: result.lastInsertRowid, ...contact, phone };
+    const saved = this.db.prepare("SELECT * FROM contacts WHERE phone = ?").get(phone);
+    const groupId = contact.groupId || contact.group_id;
+    if (groupId) this.addContactToGroup(groupId, saved.id);
+    return { ...saved, tags: JSON.parse(saved.tags || "[]"), phone };
   }
 
   removeContact(id) {
@@ -123,8 +134,21 @@ class WasendDatabase {
     return this.run("DELETE FROM contacts WHERE id NOT IN (SELECT MIN(id) FROM contacts GROUP BY phone)");
   }
 
-  listGroups() { return this.all("SELECT * FROM contact_groups ORDER BY name"); }
-  createGroup(name) { return this.run("INSERT INTO contact_groups(name) VALUES (?)", [name]); }
+  listGroups() {
+    return this.all(`
+      SELECT contact_groups.*, COUNT(contact_group_members.contact_id) AS contacts
+      FROM contact_groups
+      LEFT JOIN contact_group_members ON contact_group_members.group_id = contact_groups.id
+      GROUP BY contact_groups.id
+      ORDER BY name
+    `);
+  }
+  createGroup(name) {
+    const cleaned = String(name || "").trim();
+    if (!cleaned) throw new Error("Enter a group name.");
+    this.run("INSERT OR IGNORE INTO contact_groups(name) VALUES (?)", [cleaned]);
+    return this.db.prepare("SELECT * FROM contact_groups WHERE name = ?").get(cleaned);
+  }
   addContactToGroup(groupId, contactId) { return this.run("INSERT OR IGNORE INTO contact_group_members(group_id, contact_id) VALUES (?, ?)", [groupId, contactId]); }
 
   listTemplates() { return this.all("SELECT * FROM templates ORDER BY created_at DESC"); }
@@ -190,20 +214,21 @@ class WasendDatabase {
     return this.all("SELECT campaign_logs.*, contacts.name, contacts.phone FROM campaign_logs JOIN contacts ON contacts.id = campaign_logs.contact_id WHERE campaign_id = ? ORDER BY campaign_logs.id DESC", [campaignId]);
   }
 
-  getDashboardSummary() {
+  getDashboardSummary(days = 7) {
+    const range = Math.min(Math.max(Number(days || 7), 1), 90);
     const contacts = this.db.prepare("SELECT COUNT(*) AS count FROM contacts").get().count;
     const logs = this.db.prepare("SELECT SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) AS sent, SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed FROM campaign_logs").get();
     const active = this.db.prepare("SELECT COUNT(*) AS count FROM campaigns WHERE status IN ('Running', 'Paused', 'Scheduled')").get().count;
     const timeline = this.all(`
       SELECT date(sent_at) AS day, COUNT(*) AS sent
       FROM campaign_logs
-      WHERE status = 'sent' AND sent_at >= datetime('now', '-6 days')
+      WHERE status = 'sent' AND sent_at >= date('now', ?)
       GROUP BY date(sent_at)
       ORDER BY day
-    `);
+    `, [`-${range - 1} days`]);
     const sent = Number(logs.sent || 0);
     const failed = Number(logs.failed || 0);
-    return { contacts: Number(contacts), activeCampaigns: Number(active), sent, failed, successRate: sent + failed ? Math.round((sent / (sent + failed)) * 1000) / 10 : 0, timeline };
+    return { contacts: Number(contacts), activeCampaigns: Number(active), sent, failed, successRate: sent + failed ? Math.round((sent / (sent + failed)) * 1000) / 10 : 0, timeline, range };
   }
 
   listMedia() { return this.all("SELECT * FROM media_files ORDER BY created_at DESC"); }
@@ -239,12 +264,27 @@ class WasendDatabase {
   }
 
   getCampaignRecipients(campaignId) {
+    const campaign = this.getCampaign(campaignId);
+    const settings = JSON.parse(campaign?.settings_json || "{}");
+    const selectedIds = Array.isArray(settings.selectedContactIds) ? settings.selectedContactIds.map(Number).filter(Boolean) : [];
+    const groupId = Number(campaign?.group_id || settings.groupId || 0);
+    const filters = [
+      "c.phone NOT IN (SELECT phone FROM blacklist)",
+      "c.id NOT IN (SELECT contact_id FROM campaign_logs WHERE campaign_id = ? AND status = 'sent')",
+    ];
+    const params = [campaignId];
+    if (selectedIds.length) {
+      filters.push(`c.id IN (${selectedIds.map(() => "?").join(",")})`);
+      params.push(...selectedIds);
+    } else if (groupId) {
+      filters.push("c.id IN (SELECT contact_id FROM contact_group_members WHERE group_id = ?)");
+      params.push(groupId);
+    }
     return this.all(`
       SELECT c.* FROM contacts c
-      WHERE c.phone NOT IN (SELECT phone FROM blacklist)
-      AND c.id NOT IN (SELECT contact_id FROM campaign_logs WHERE campaign_id = ? AND status = 'sent')
+      WHERE ${filters.join("\n      AND ")}
       ORDER BY c.id
-    `, [campaignId]);
+    `, params);
   }
 
   logCampaignContact(campaignId, contactId, status, error = null) {

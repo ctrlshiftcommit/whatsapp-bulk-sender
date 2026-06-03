@@ -12,7 +12,7 @@ class CampaignScheduler {
 
   beginPolling(interval = 30000) {
     if (this.poller) return;
-    const check = () => this.database.scheduledCampaignsDue().forEach((campaign) => this.start(campaign.id, JSON.parse(campaign.settings_json || "{}")));
+    const check = () => this.database.scheduledCampaignsDue().forEach((campaign) => this.start(campaign.id, { ...(this.database.getSettings?.() || {}), ...JSON.parse(campaign.settings_json || "{}") }));
     check();
     this.poller = setInterval(check, interval);
   }

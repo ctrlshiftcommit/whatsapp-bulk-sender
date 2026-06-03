@@ -1,8 +1,9 @@
 const { app, BrowserWindow, ipcMain, dialog, Menu } = require("electron");
 const path = require("path");
 const fs = require("fs");
+const { pathToFileURL } = require("url");
 const { WasendDatabase } = require("./services/database.cjs");
-const { parseCsv, parseWorkbook, parsePasted, parseGoogleSheet, exportCsv } = require("./services/importer.cjs");
+const { parseCsv, parseCsvRows, parseWorkbook, parseWorkbookRows, parsePasted, parseGoogleSheet, exportCsv } = require("./services/importer.cjs");
 const { CampaignScheduler } = require("./services/scheduler.cjs");
 const { WhatsAppSession } = require("./services/whatsapp.cjs");
 
@@ -66,19 +67,32 @@ function registerIpc() {
     fs.writeFileSync(result.filePath, exportCsv(database.listContacts()), "utf8");
     return true;
   });
-  ipcMain.handle("contacts:import", async (_event, { type, content, defaultCountryCode }) => {
-    const contacts = type === "csv" ? parseCsv(content, defaultCountryCode) : type === "xlsx" ? await parseWorkbook(Buffer.from(content), defaultCountryCode) : type === "sheets" ? await parseGoogleSheet(content, defaultCountryCode) : parsePasted(content, defaultCountryCode);
-    return contacts.map((contact) => database.addContact(contact));
+  ipcMain.handle("contacts:import", async (_event, { type, content, defaultCountryCode, mapping, groupId, groupName }) => {
+    const group = groupName ? database.createGroup(groupName) : groupId ? { id: groupId } : null;
+    const contacts = type === "csv" ? parseCsv(content, defaultCountryCode, mapping) : type === "xlsx" ? await parseWorkbook(Buffer.from(content), defaultCountryCode, mapping) : type === "sheets" ? await parseGoogleSheet(content, defaultCountryCode) : parsePasted(content, defaultCountryCode);
+    return contacts.map((contact) => database.addContact({ ...contact, groupId: group?.id }));
   });
-  ipcMain.handle("contacts:import-file", async () => {
+  ipcMain.handle("contacts:preview-file", async () => {
     const result = await dialog.showOpenDialog(mainWindow, { properties: ["openFile"], filters: [{ name: "Contact lists", extensions: ["csv", "xlsx"] }] });
-    if (result.canceled || !result.filePaths[0]) return [];
+    if (result.canceled || !result.filePaths[0]) return null;
     const source = result.filePaths[0];
     const extension = path.extname(source).toLowerCase();
     const content = fs.readFileSync(source);
-    const countryCode = String(database.getSettings().country || "91").replace(/\D/g, "");
-    const contacts = extension === ".csv" ? parseCsv(content.toString("utf8"), countryCode) : await parseWorkbook(content, countryCode);
-    return contacts.map((contact) => database.addContact(contact));
+    const parsed = extension === ".csv" ? parseCsvRows(content.toString("utf8")) : await parseWorkbookRows(content);
+    return {
+      source,
+      extension,
+      headers: parsed.headers,
+      rows: parsed.rows.slice(0, 5),
+      totalRows: parsed.rows.length,
+    };
+  });
+  ipcMain.handle("contacts:import-file", async (_event, { source, extension, defaultCountryCode, mapping, groupId, groupName }) => {
+    if (!source) return [];
+    const group = groupName ? database.createGroup(groupName) : groupId ? { id: groupId } : null;
+    const content = fs.readFileSync(source);
+    const contacts = extension === ".csv" ? parseCsv(content.toString("utf8"), defaultCountryCode, mapping) : await parseWorkbook(content, defaultCountryCode, mapping);
+    return contacts.map((contact) => database.addContact({ ...contact, groupId: group?.id }));
   });
   ipcMain.handle("groups:list", () => database.listGroups());
   ipcMain.handle("groups:create", (_event, name) => database.createGroup(name));
@@ -87,7 +101,7 @@ function registerIpc() {
   ipcMain.handle("templates:remove", (_event, id) => database.removeTemplate(id));
   ipcMain.handle("templates:duplicate", (_event, id) => database.duplicateTemplate(id));
   ipcMain.handle("campaigns:list", () => database.listCampaigns());
-  ipcMain.handle("dashboard:summary", () => database.getDashboardSummary());
+  ipcMain.handle("dashboard:summary", (_event, days) => database.getDashboardSummary(days));
   ipcMain.handle("campaigns:create", (_event, campaign) => database.createCampaign(campaign));
   ipcMain.handle("campaigns:start", (_event, id) => scheduler.start(id, assertCampaignReady(id)));
   ipcMain.handle("campaigns:resume", (_event, id) => scheduler.resume(id, assertCampaignReady(id)));
@@ -99,7 +113,8 @@ function registerIpc() {
     return database.removeCampaign(id);
   });
   ipcMain.handle("campaigns:logs", (_event, id) => database.listCampaignLogs(id));
-  ipcMain.handle("media:list", () => database.listMedia());
+  const withMediaPreview = (file) => ({ ...file, previewUrl: file.filepath ? pathToFileURL(file.filepath).toString() : "" });
+  ipcMain.handle("media:list", () => database.listMedia().map(withMediaPreview));
   ipcMain.handle("media:add", async () => {
     const result = await dialog.showOpenDialog(mainWindow, { properties: ["openFile"], filters: [{ name: "Supported media", extensions: ["jpg", "jpeg", "png", "gif", "webp", "pdf", "docx", "xlsx", "mp4", "mp3"] }] });
     if (result.canceled || !result.filePaths[0]) return null;
@@ -109,9 +124,14 @@ function registerIpc() {
     const destination = path.join(mediaDirectory, `${Date.now()}-${path.basename(source)}`);
     fs.copyFileSync(source, destination);
     database.addMedia({ filename: path.basename(source), filepath: destination, type: path.extname(source).slice(1).toLowerCase() });
-    return database.listMedia()[0];
+    return withMediaPreview(database.listMedia()[0]);
   });
-  ipcMain.handle("media:remove", (_event, id) => database.removeMedia(id));
+  ipcMain.handle("media:remove", (_event, id) => {
+    const file = database.all("SELECT * FROM media_files WHERE id = ?", [id])[0];
+    const result = database.removeMedia(id);
+    if (file?.filepath) fs.rmSync(file.filepath, { force: true });
+    return result;
+  });
   ipcMain.handle("blacklist:list", () => database.listBlacklist());
   ipcMain.handle("blacklist:add", (_event, phone, reason) => database.addBlacklist(phone, reason));
   ipcMain.handle("blacklist:remove", (_event, id) => database.removeBlacklist(id));

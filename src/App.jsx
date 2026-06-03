@@ -12,16 +12,17 @@ const mockStore = {
   connection: { status: "disconnected" },
   settings: {},
   contacts: [],
+  groups: [],
   templates: [],
   campaigns: [],
   media: [],
   blacklist: [],
 };
 
-const mockSummary = () => {
+const mockSummary = (days = 7) => {
   const sent = mockStore.campaigns.reduce((total, campaign) => total + Number(campaign.sent || 0), 0);
   const failed = mockStore.campaigns.reduce((total, campaign) => total + Number(campaign.failed || 0), 0);
-  return { contacts: mockStore.contacts.length, activeCampaigns: mockStore.campaigns.filter((campaign) => ["Running", "Paused", "Scheduled"].includes(campaign.status)).length, sent, failed, successRate: sent + failed ? Math.round((sent / (sent + failed)) * 1000) / 10 : 0, timeline: [] };
+  return { contacts: mockStore.contacts.length, activeCampaigns: mockStore.campaigns.filter((campaign) => ["Running", "Paused", "Scheduled"].includes(campaign.status)).length, sent, failed, successRate: sent + failed ? Math.round((sent / (sent + failed)) * 1000) / 10 : 0, timeline: [], range: days };
 };
 
 const api = window.wasend || {
@@ -34,21 +35,33 @@ const api = window.wasend || {
   addContact: async (contact) => {
     const phone = contact.phone?.startsWith("+") ? contact.phone : `+91${String(contact.phone || "").replace(/\D/g, "")}`;
     const saved = { ...contact, phone, id: Date.now() };
+    if (contact.groupId) saved.groups = [mockStore.groups.find((group) => String(group.id) === String(contact.groupId))].filter(Boolean);
     mockStore.contacts = [saved, ...mockStore.contacts.filter((item) => item.phone !== phone)];
     return saved;
   },
   removeContact: async (id) => { mockStore.contacts = mockStore.contacts.filter((contact) => contact.id !== id); return true; },
-  importContacts: async ({ content }) => {
+  importContacts: async ({ content, groupId, groupName }) => {
+    const group = groupName ? await api.createGroup(groupName) : mockStore.groups.find((item) => String(item.id) === String(groupId));
     const imported = content.split(/\r?\n/).map((phone, index) => ({ id: Date.now() + index, name: "", phone: phone.startsWith("+") ? phone : `+91${phone.replace(/\D/g, "")}`, tags: ["imported"], custom1: "", custom2: "" })).filter((contact) => contact.phone.length > 3);
+    if (group) imported.forEach((contact) => { contact.groups = [group]; });
     mockStore.contacts = [...imported, ...mockStore.contacts];
     return imported;
   },
+  previewContactFile: async () => null,
   importContactFile: async () => [],
   exportContacts: async () => true,
+  listGroups: async () => mockStore.groups.map((group) => ({ ...group, contacts: mockStore.contacts.filter((contact) => contact.groups?.some((item) => item.id === group.id)).length })),
+  createGroup: async (name) => {
+    const existing = mockStore.groups.find((group) => group.name.toLowerCase() === String(name).toLowerCase());
+    if (existing) return existing;
+    const saved = { id: Date.now(), name };
+    mockStore.groups = [saved, ...mockStore.groups];
+    return saved;
+  },
   listTemplates: async () => mockStore.templates,
   saveTemplate: async (template) => { const saved = { ...template, id: Date.now() }; mockStore.templates = [saved, ...mockStore.templates]; return saved; },
   listCampaigns: async () => mockStore.campaigns,
-  getDashboardSummary: async () => mockSummary(),
+  getDashboardSummary: async (days) => mockSummary(days),
   createCampaign: async (campaign) => { const saved = { ...campaign, id: Date.now() }; mockStore.campaigns = [saved, ...mockStore.campaigns]; return saved; },
   startCampaign: async (id) => { mockStore.campaigns = mockStore.campaigns.map((campaign) => campaign.id === id ? { ...campaign, status: "Running" } : campaign); return true; },
   resumeCampaign: async (id) => { mockStore.campaigns = mockStore.campaigns.map((campaign) => campaign.id === id ? { ...campaign, status: "Running" } : campaign); return true; },
@@ -84,6 +97,7 @@ const initials = (name) => name.split(" ").map((part) => part[0]).join("").slice
 function App() {
   const [page, setPage] = useState("Dashboard");
   const [contacts, setContacts] = useState([]);
+  const [groups, setGroups] = useState([]);
   const [templates, setTemplates] = useState([]);
   const [campaigns, setCampaigns] = useState([]);
   const [media, setMedia] = useState([]);
@@ -92,6 +106,7 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [modal, setModal] = useState(null);
   const [toast, setToast] = useState(null);
+  const [importPreview, setImportPreview] = useState(null);
   const [onboarding, setOnboarding] = useState(false);
   const [notifications, setNotifications] = useState([]);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
@@ -124,9 +139,10 @@ function App() {
   useEffect(() => {
     api.getConnection().then(recordConnectionStatus).catch(() => {});
     if (window.wasend) api.getSettings().then((settings) => { applyTheme(settings.theme); return settings.reconnect !== false && api.connect().then(recordConnectionStatus); }).catch(() => {});
-    Promise.all([api.listContacts(), api.listTemplates(), api.listCampaigns(), api.listMedia(), api.getDashboardSummary()])
-      .then(([freshContacts, freshTemplates, freshCampaigns, freshMedia, freshSummary]) => {
+    Promise.all([api.listContacts(), api.listGroups?.() || [], api.listTemplates(), api.listCampaigns(), api.listMedia(), api.getDashboardSummary()])
+      .then(([freshContacts, freshGroups, freshTemplates, freshCampaigns, freshMedia, freshSummary]) => {
         setContacts(freshContacts);
+        setGroups(freshGroups);
         setTemplates(freshTemplates);
         setCampaigns(freshCampaigns);
         setMedia(freshMedia);
@@ -164,7 +180,7 @@ function App() {
     notify(error?.message || fallback, "error");
   };
 
-  const context = { page, setPage, contacts, setContacts, templates, setTemplates, campaigns, setCampaigns, media, setMedia, summary, setSummary, loading, connection, setConnection, setModal, notify, reportError };
+  const context = { page, setPage, contacts, setContacts, groups, setGroups, templates, setTemplates, campaigns, setCampaigns, media, setMedia, summary, setSummary, loading, connection, setConnection, setModal, notify, reportError };
   const Page = { Dashboard, ContactsPage, TemplatesPage, CampaignsPage, MediaPage, ReportsPage, SettingsPage }[page === "Media Library" ? "MediaPage" : `${page}Page`] || Dashboard;
 
   return (
@@ -177,10 +193,11 @@ function App() {
           <Page {...context} />
         </div>
       </main>
-      {modal === "contact" && <ContactModal onClose={() => setModal(null)} onSave={async (contact) => { try { const saved = await api.addContact(contact); setContacts(await api.listContacts()); setSummary(await api.getDashboardSummary()); setModal(null); notify(saved?.id ? "Contact added successfully" : "Contact updated successfully"); } catch (error) { reportError(error, "Could not save contact"); } }} />}
+      {modal === "contact" && <ContactModal groups={groups} onClose={() => setModal(null)} onSave={async (contact) => { try { const saved = await api.addContact(contact); setContacts(await api.listContacts()); setGroups(await api.listGroups?.() || []); setSummary(await api.getDashboardSummary()); setModal(null); notify(saved?.id ? "Contact added successfully" : "Contact updated successfully"); } catch (error) { reportError(error, "Could not save contact"); } }} />}
       {modal === "template" && <TemplateModal onClose={() => setModal(null)} onSave={async (template) => { try { const saved = await api.saveTemplate(template); setTemplates((items) => [{ ...template, id: saved.id || Date.now() }, ...items]); setModal(null); notify("Template saved"); } catch (error) { reportError(error, "Could not save template"); } }} />}
-      {modal === "campaign" && <CampaignWizard contacts={contacts} templates={templates} media={media} connection={connection} onClose={() => setModal(null)} onLaunch={async (campaign) => { try { const saved = await api.createCampaign(campaign); if (!campaign.scheduledAt) await api.startCampaign(saved.id); setCampaigns(await api.listCampaigns()); setSummary(await api.getDashboardSummary()); setPage("Campaigns"); setModal(null); notify(campaign.scheduledAt ? "Campaign scheduled" : "Campaign launched"); } catch (error) { reportError(error, "Could not launch campaign"); } }} />}
-      {modal === "import" && <ImportModal onClose={() => setModal(null)} onImport={async (payload) => { try { const settings = await api.getSettings(); const added = await api.importContacts({ ...payload, defaultCountryCode: String(settings.country || "91").replace(/\D/g, "") }); setContacts(await api.listContacts()); setSummary(await api.getDashboardSummary()); setModal(null); notify(`${added.length} contacts imported`); } catch (error) { reportError(error, "Could not import contacts"); } }} onImportFile={async () => { try { const added = await api.importContactFile(); setContacts(await api.listContacts()); setSummary(await api.getDashboardSummary()); setModal(null); notify(`${added.length} contacts imported`); } catch (error) { reportError(error, "Could not import contacts"); } }} />}
+      {modal === "campaign" && <CampaignWizard contacts={contacts} groups={groups} templates={templates} media={media} connection={connection} onClose={() => setModal(null)} onLaunch={async (campaign) => { try { const saved = await api.createCampaign(campaign); if (!campaign.scheduledAt) await api.startCampaign(saved.id); setCampaigns(await api.listCampaigns()); setSummary(await api.getDashboardSummary()); setPage("Campaigns"); setModal(null); notify(campaign.scheduledAt ? "Campaign scheduled" : "Campaign launched"); } catch (error) { reportError(error, "Could not launch campaign"); } }} />}
+      {modal === "import" && <ImportModal groups={groups} onClose={() => setModal(null)} onImport={async (payload) => { try { const settings = await api.getSettings(); const added = await api.importContacts({ ...payload, defaultCountryCode: String(settings.country || "91").replace(/\D/g, "") }); setContacts(await api.listContacts()); setGroups(await api.listGroups?.() || []); setSummary(await api.getDashboardSummary()); setModal(null); notify(`${added.length} contacts imported`); } catch (error) { reportError(error, "Could not import contacts"); } }} onImportFile={async () => { try { const preview = await api.previewContactFile?.(); if (preview) { setImportPreview(preview); setModal("import-map"); } } catch (error) { reportError(error, "Could not open contact file"); } }} />}
+      {modal === "import-map" && importPreview && <ImportMapModal preview={importPreview} groups={groups} onClose={() => { setModal(null); setImportPreview(null); }} onImport={async (payload) => { try { const settings = await api.getSettings(); const added = await api.importContactFile({ ...importPreview, ...payload, defaultCountryCode: String(settings.country || "91").replace(/\D/g, "") }); setContacts(await api.listContacts()); setGroups(await api.listGroups?.() || []); setSummary(await api.getDashboardSummary()); setModal(null); setImportPreview(null); notify(`${added.length} contacts imported`); } catch (error) { reportError(error, "Could not import contacts"); } }} />}
       {modal === "connect" && <ConnectionModal connection={connection} onClose={() => setModal(null)} onConnect={async () => { try { recordConnectionStatus(await api.connect()); } catch (error) { reportError(error, "Could not open WhatsApp Web"); } }} onDisconnect={async () => { try { await api.disconnect?.(); recordConnectionStatus({ status: "disconnected" }); setModal(null); notify("WhatsApp disconnected", "warning"); } catch (error) { reportError(error, "Could not disconnect WhatsApp"); } }} />}
       {onboarding && <Onboarding onClose={() => setOnboarding(false)} setModal={setModal} />}
       {toast && <Toast {...toast} />}
@@ -251,11 +268,20 @@ function PolicyBanner() {
 }
 
 function Dashboard({ campaigns, contacts, connection, setModal, summary, loading }) {
+  const [range, setRange] = useState(summary.range || 7);
+  const [chartSummary, setChartSummary] = useState(summary);
+  useEffect(() => setChartSummary(summary), [summary]);
+  const changeRange = async (value) => {
+    const days = Number(value);
+    setRange(days);
+    setChartSummary(await api.getDashboardSummary(days));
+  };
   const scheduled = campaigns.filter((campaign) => campaign.status === "Scheduled");
+  const rangeLabel = `${range} days`;
   const stats = [
-    ["Total Sent", summary.sent.toLocaleString(), "All recorded sends", Send, "text-indigo-600 bg-indigo-50"],
-    ["Success Rate", `${summary.successRate}%`, `${summary.failed.toLocaleString()} failed`, CheckCircle2, "text-emerald-600 bg-emerald-50"],
-    ["Active Campaigns", summary.activeCampaigns.toLocaleString(), "Running, paused, or scheduled", Gauge, "text-amber-600 bg-amber-50"],
+    ["Total Sent", chartSummary.sent.toLocaleString(), "All recorded sends", Send, "text-indigo-600 bg-indigo-50"],
+    ["Success Rate", `${chartSummary.successRate}%`, `${chartSummary.failed.toLocaleString()} failed`, CheckCircle2, "text-emerald-600 bg-emerald-50"],
+    ["Active Campaigns", chartSummary.activeCampaigns.toLocaleString(), "Running, paused, or scheduled", Gauge, "text-amber-600 bg-amber-50"],
     ["Contacts", contacts.length.toLocaleString(), "Opted-in records", Users, "text-sky-600 bg-sky-50"],
   ];
   return <div className="space-y-5">
@@ -266,7 +292,7 @@ function Dashboard({ campaigns, contacts, connection, setModal, summary, loading
       </div>)}
     </div>
     <div className="grid grid-cols-[1fr_278px] gap-5">
-      <section className="panel p-5"><SectionTitle title="Messages Overview" sub="Messages sent over the last 7 days" action={<button className="btn-secondary">Last 7 days <ChevronDown size={14} /></button>} /><OverviewChart timeline={summary.timeline} loading={loading} /></section>
+      <section className="panel p-5"><SectionTitle title="Messages Overview" sub={`Messages sent over the last ${rangeLabel}`} action={<label className="btn-secondary cursor-pointer"><select value={range} onChange={(event) => changeRange(event.target.value)} className="bg-transparent text-sm font-semibold outline-none"><option value="7">Last 7 days</option><option value="14">Last 14 days</option><option value="30">Last 30 days</option><option value="60">Last 60 days</option><option value="90">Last 90 days</option></select><ChevronDown size={14} /></label>} /><OverviewChart timeline={chartSummary.timeline} days={range} loading={loading} /></section>
       <ConnectionCard connection={connection} setModal={setModal} />
     </div>
     <div className="grid grid-cols-[1fr_278px] gap-5">
@@ -276,8 +302,8 @@ function Dashboard({ campaigns, contacts, connection, setModal, summary, loading
   </div>;
 }
 
-function OverviewChart({ timeline, loading }) {
-  const values = lastSevenDays(timeline);
+function OverviewChart({ timeline, days = 7, loading }) {
+  const values = rangeDays(timeline, days);
   const max = Math.max(...values.map((item) => item.sent), 1);
   return <div className="mt-6 flex h-[164px] items-end gap-3 border-b border-slate-100 pb-2">
     {values.map((item) => <div key={item.day} className="flex h-full flex-1 flex-col justify-end gap-2 text-center"><div className={cx("mx-auto w-[55%] rounded-t transition", loading ? "animate-pulse bg-slate-200" : "bg-emerald/85 hover:bg-emerald")} style={{ height: `${loading ? 38 : (item.sent / max) * 128}px` }} /><span className="text-[10px] text-slate-400">{item.label}</span></div>)}
@@ -296,13 +322,14 @@ function ConnectionCard({ connection, setModal }) {
   </section>;
 }
 
-function ContactsPage({ contacts, setContacts, setModal, setSummary, notify }) {
+function ContactsPage({ contacts, setContacts, groups, setGroups, setModal, setSummary, notify }) {
   const [query, setQuery] = useState("");
-  const shown = contacts.filter((c) => `${c.name} ${c.phone} ${c.tags.join(" ")}`.toLowerCase().includes(query.toLowerCase()));
+  const shown = contacts.filter((c) => `${c.name} ${c.phone} ${c.tags.join(" ")} ${(c.groups || []).map((group) => group.name).join(" ")}`.toLowerCase().includes(query.toLowerCase()));
   return <div className="space-y-5">
     <div className="flex items-center justify-between"><p className="text-sm text-slate-500">{contacts.length} saved contacts with opt-in records and tags.</p><div className="flex gap-2"><button onClick={async () => { await api.exportContacts(); notify("Contacts exported to CSV"); }} className="btn-secondary"><Download size={16} /> Export</button><button onClick={() => setModal("import")} className="btn-secondary"><Import size={16} /> Import</button><button onClick={() => setModal("contact")} className="btn-primary"><Plus size={16} /> Add Contact</button></div></div>
+    <section className="panel p-4"><div className="flex items-center justify-between"><SectionTitle title="Contact groups" sub="Use groups to target categories during campaign launch." /><button onClick={async () => { const name = window.prompt("New group name"); if (name) { await api.createGroup(name); setGroups(await api.listGroups?.() || []); notify("Group created"); } }} className="btn-secondary"><Plus size={15} /> New group</button></div><div className="mt-3 flex flex-wrap gap-2">{groups.length ? groups.map((group) => <span key={group.id} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-600">{group.name} <span className="text-slate-400">{Number(group.contacts || 0)}</span></span>) : <span className="text-xs text-slate-400">No groups yet</span>}</div></section>
     <section className="panel overflow-hidden"><div className="flex items-center justify-between border-b border-slate-100 p-4"><SearchBox value={query} setValue={setQuery} placeholder="Search name, phone, or tag" /><button className="btn-secondary"><ListFilter size={15} /> Filter</button></div>
-      {shown.length ? <table className="w-full"><thead className="border-b border-slate-100 bg-slate-50"><tr>{["Contact", "Phone number", "Tags", "Location", "Plan", ""].map((h) => <th key={h} className="table-head px-4 py-3">{h}</th>)}</tr></thead><tbody>{shown.map((contact) => <tr key={contact.id} className="border-b border-slate-100 text-xs hover:bg-slate-50/70"><td className="px-4 py-3"><div className="flex items-center gap-2.5"><Avatar name={contact.name} /><b>{contact.name || "Unnamed contact"}</b></div></td><td className="px-4 py-3 text-slate-600">{contact.phone}</td><td className="px-4 py-3"><div className="flex gap-1">{contact.tags.map((tag) => <Tag key={tag}>{tag}</Tag>)}</div></td><td className="px-4 py-3 text-slate-500">{contact.custom1}</td><td className="px-4 py-3 text-slate-500">{contact.custom2}</td><td className="px-4 py-3 text-right"><button onClick={async () => { await api.removeContact(contact.id); setContacts((items) => items.filter((x) => x.id !== contact.id)); setSummary(await api.getDashboardSummary()); notify("Contact removed", "warning"); }} className="text-slate-400 hover:text-rose-500"><Trash2 size={15} /></button></td></tr>)}</tbody></table> : <EmptyState icon={ContactRound} title={query ? "No matching contacts" : "No contacts yet"} text={query ? "Try a different search term." : "Import a list or add an opted-in contact manually."} />}
+      {shown.length ? <table className="w-full"><thead className="border-b border-slate-100 bg-slate-50"><tr>{["Contact", "Phone number", "Groups", "Tags", "Location", "Plan", ""].map((h) => <th key={h} className="table-head px-4 py-3">{h}</th>)}</tr></thead><tbody>{shown.map((contact) => <tr key={contact.id} className="border-b border-slate-100 text-xs hover:bg-slate-50/70"><td className="px-4 py-3"><div className="flex items-center gap-2.5"><Avatar name={contact.name} /><b>{contact.name || "Unnamed contact"}</b></div></td><td className="px-4 py-3 text-slate-600">{contact.phone}</td><td className="px-4 py-3"><div className="flex gap-1">{(contact.groups || []).map((group) => <Tag key={group.id}>{group.name}</Tag>)}</div></td><td className="px-4 py-3"><div className="flex gap-1">{contact.tags.map((tag) => <Tag key={tag}>{tag}</Tag>)}</div></td><td className="px-4 py-3 text-slate-500">{contact.custom1}</td><td className="px-4 py-3 text-slate-500">{contact.custom2}</td><td className="px-4 py-3 text-right"><button onClick={async () => { await api.removeContact(contact.id); setContacts((items) => items.filter((x) => x.id !== contact.id)); setSummary(await api.getDashboardSummary()); notify("Contact removed", "warning"); }} className="text-slate-400 hover:text-rose-500"><Trash2 size={15} /></button></td></tr>)}</tbody></table> : <EmptyState icon={ContactRound} title={query ? "No matching contacts" : "No contacts yet"} text={query ? "Try a different search term." : "Import a list or add an opted-in contact manually."} />}
     </section>
   </div>;
 }
@@ -343,8 +370,14 @@ function CampaignTable({ campaigns, compact, actions, changeStatus, duplicate, r
 }
 
 function MediaPage({ media, setMedia, notify }) {
+  const remove = async (file) => {
+    if (!window.confirm(`Remove ${file.filename || file.name} from the media library?`)) return;
+    await api.removeMedia(file.id);
+    setMedia((items) => items.filter((item) => item.id !== file.id));
+    notify("Attachment removed", "warning");
+  };
   return <div><div className="mb-5 flex items-center justify-between"><p className="text-sm text-slate-500">Reuse attachments across approved campaigns.</p><button onClick={async () => { const uploaded = await api.addMedia(); if (uploaded) { setMedia((items) => [uploaded, ...items]); notify("File added to media library"); } }} className="btn-primary"><Upload size={16} /> Upload File</button></div>
-    {media.length ? <div className="grid grid-cols-4 gap-4">{media.map((file) => <section key={file.id} className="panel overflow-hidden"><div className={cx("flex h-28 items-center justify-center", file.color || "bg-slate-100")}>{String(file.type).match(/jpg|jpeg|png|gif|webp|Image/i) ? <Image size={32} /> : String(file.type).match(/mp4|Video/i) ? <Film size={32} /> : String(file.type).match(/mp3|Audio/i) ? <Music2 size={32} /> : <FileText size={32} />}</div><div className="p-3"><div className="truncate text-xs font-bold text-slate-700">{file.name || file.filename}</div><div className="mt-1 text-[11px] text-slate-400">{file.type} {file.size && `· ${file.size}`}</div></div></section>)}</div> : <section className="panel"><EmptyState icon={Paperclip} title="No attachments yet" text="Upload a file when you want to reuse it in campaigns." /></section>}
+    {media.length ? <div className="grid grid-cols-4 gap-4">{media.map((file) => <section key={file.id} className="panel overflow-hidden"><div className="relative flex h-32 items-center justify-center bg-slate-100"><button onClick={() => remove(file)} className="absolute right-2 top-2 z-10 flex h-8 w-8 items-center justify-center rounded-lg bg-white/95 text-slate-500 shadow-sm hover:text-rose-600" aria-label={`Remove ${file.filename || file.name}`}><Trash2 size={14} /></button>{String(file.type).match(/jpg|jpeg|png|gif|webp|Image/i) && file.previewUrl ? <img src={file.previewUrl} alt={file.filename || file.name} className="h-full w-full object-cover" /> : String(file.type).match(/jpg|jpeg|png|gif|webp|Image/i) ? <Image size={32} className="text-slate-400" /> : String(file.type).match(/mp4|Video/i) ? <Film size={32} className="text-slate-400" /> : String(file.type).match(/mp3|Audio/i) ? <Music2 size={32} className="text-slate-400" /> : <FileText size={32} className="text-slate-400" />}</div><div className="p-3"><div className="truncate text-xs font-bold text-slate-700">{file.name || file.filename}</div><div className="mt-1 text-[11px] text-slate-400">{file.type} {file.size && ` - ${file.size}`}</div></div></section>)}</div> : <section className="panel"><EmptyState icon={Paperclip} title="No attachments yet" text="Upload a file when you want to reuse it in campaigns." /></section>}
   </div>;
 }
 
@@ -360,12 +393,12 @@ function SettingsPage({ notify }) {
   useEffect(() => { Promise.all([api.getSettings(), api.listBlacklist()]).then(([saved, blocked]) => { setSettings({ ...defaults, ...saved }); setBlacklist(blocked); }).catch(() => {}); }, []);
   useEffect(() => { applyTheme(settings.theme); }, [settings.theme]);
   const update = (key, value) => setSettings((current) => ({ ...current, [key]: value }));
-  return <div className="grid grid-cols-[1fr_310px] gap-5"><section className="panel divide-y divide-slate-100"><div className="p-5"><SectionTitle title="Sending limits" sub="Use conservative limits and send only to opted-in contacts." /><div className="mt-5 grid grid-cols-3 gap-4"><SettingInput label="Minimum delay (sec)" value={settings.minDelay} onChange={(v) => update("minDelay", v)} /><SettingInput label="Maximum delay (sec)" value={settings.maxDelay} onChange={(v) => update("maxDelay", v)} /><SettingInput label="Max messages / session" value={settings.maxSession} onChange={(v) => update("maxSession", v)} /><SettingInput label="Batch size" value={settings.batch} onChange={(v) => update("batch", v)} /><SettingInput label="Pause between batches (min)" value={settings.pause} onChange={(v) => update("pause", v)} /><SettingInput label="Retry failed messages" value={settings.retries} onChange={(v) => update("retries", v)} /></div></div><div className="p-5"><SectionTitle title="Application preferences" /><div className="mt-4 grid grid-cols-3 gap-4"><SelectField label="Default country code" value={settings.country} onChange={(v) => update("country", v)} options={[["+91", "India (+91)"], ["+1", "United States (+1)"], ["+44", "United Kingdom (+44)"], ["+971", "UAE (+971)"], ["+61", "Australia (+61)"], ["+65", "Singapore (+65)"]]} /><SelectField label="Timezone" value={settings.timezone} onChange={(v) => update("timezone", v)} options={timezoneOptions(settings.timezone).map((item) => [item, item])} /><SelectField label="App theme" value={settings.theme} onChange={(v) => update("theme", v)} options={[["light", "Light"], ["dark", "Dark"]]} /></div><div className="mt-5 space-y-4"><Toggle label="Auto-reconnect WhatsApp Web session" value={settings.reconnect} setValue={(v) => update("reconnect", v)} /><Toggle label="Play notification sound when a campaign completes" value={settings.sounds} setValue={(v) => update("sounds", v)} /></div></div><div className="p-5"><button onClick={async () => { setSettings({ ...defaults, ...await api.saveSettings(settings) }); notify("Settings saved"); }} className="btn-primary">Save settings</button></div></section><aside className="space-y-4"><section className="panel p-5"><h2 className="text-sm font-bold text-ink">Do-not-contact list</h2><p className="mt-2 text-xs leading-5 text-slate-500">Blocked numbers are skipped in every campaign.</p><div className="mt-3 flex gap-2"><input value={blockedPhone} onChange={(e) => setBlockedPhone(e.target.value)} className="input py-2" placeholder="+91..." /><button onClick={async () => { await api.addBlacklist(blockedPhone, "Manual block"); setBlacklist(await api.listBlacklist()); setBlockedPhone(""); notify("Number blocked"); }} className="btn-secondary">Add</button></div>{blacklist.length ? <div className="mt-3 max-h-44 space-y-2 overflow-auto">{blacklist.map((item) => <div key={item.id} className="flex items-center justify-between rounded-lg bg-slate-50 px-2.5 py-2"><span className="truncate text-[11px] font-semibold text-slate-600">{item.phone}</span><button onClick={async () => { await api.removeBlacklist(item.id); setBlacklist((items) => items.filter((entry) => entry.id !== item.id)); notify("Number removed from do-not-contact list"); }} className="text-slate-400 hover:text-rose-500" aria-label={`Remove ${item.phone} from blacklist`}><X size={13} /></button></div>)}</div> : <p className="mt-3 text-[11px] text-slate-400">No blocked numbers</p>}</section><section className="panel border-rose-200 p-5"><h2 className="text-sm font-bold text-rose-700">Danger zone</h2><p className="mt-2 text-xs leading-5 text-slate-500">Clear local campaign data or reset this application. This cannot be undone.</p><button onClick={async () => { if (window.confirm("Clear all WASend data? This cannot be undone.")) { await api.resetApp(); window.location.reload(); } }} className="mt-4 rounded-lg border border-rose-200 px-3 py-2 text-xs font-bold text-rose-600 hover:bg-rose-50">Reset application</button></section></aside></div>;
+  return <div className="grid grid-cols-[1fr_310px] gap-5"><section className="panel divide-y divide-slate-100"><div className="p-5"><SectionTitle title="Sending limits" sub="Use conservative limits and send only to opted-in contacts." /><div className="mt-5 grid grid-cols-3 gap-4"><SettingInput label="Minimum delay (sec)" value={settings.minDelay} onChange={(v) => update("minDelay", v)} /><SettingInput label="Maximum delay (sec)" value={settings.maxDelay} onChange={(v) => update("maxDelay", v)} /><SettingInput label="Max messages / session" value={settings.maxSession} onChange={(v) => update("maxSession", v)} /><SettingInput label="Batch size" value={settings.batch} onChange={(v) => update("batch", v)} /><SettingInput label="Pause between batches (min)" value={settings.pause} onChange={(v) => update("pause", v)} /><SettingInput label="Retry failed messages" value={settings.retries} onChange={(v) => update("retries", v)} /></div></div><div className="p-5"><SectionTitle title="Application preferences" /><div className="mt-4 grid grid-cols-3 gap-4"><SelectField label="Default country code" value={settings.country} onChange={(v) => update("country", v)} options={[["+91", "India (+91)"], ["+1", "United States (+1)"], ["+44", "United Kingdom (+44)"], ["+971", "UAE (+971)"], ["+61", "Australia (+61)"], ["+65", "Singapore (+65)"]]} /><SelectField label="Timezone" value={settings.timezone} onChange={(v) => update("timezone", v)} options={timezoneOptions(settings.timezone).map((item) => [item, item])} /><SelectField label="App theme" value={settings.theme} onChange={(v) => update("theme", v)} options={[["light", "Light"], ["dark", "Dark"]]} /></div><div className="mt-5 space-y-4"><Toggle label="Auto-reconnect WhatsApp Web session" value={settings.reconnect} setValue={(v) => update("reconnect", v)} /><Toggle label="Play notification sound when a campaign completes" value={settings.sounds} setValue={(v) => update("sounds", v)} /></div></div><div className="p-5"><button onClick={async () => { const normalized = normalizeSettings(settings); setSettings({ ...defaults, ...await api.saveSettings(normalized) }); notify("Settings saved"); }} className="btn-primary">Save settings</button></div></section><aside className="space-y-4"><section className="panel p-5"><h2 className="text-sm font-bold text-ink">Do-not-contact list</h2><p className="mt-2 text-xs leading-5 text-slate-500">Blocked numbers are skipped in every campaign.</p><div className="mt-3 flex gap-2"><input value={blockedPhone} onChange={(e) => setBlockedPhone(e.target.value)} className="input py-2" placeholder="+91..." /><button onClick={async () => { await api.addBlacklist(blockedPhone, "Manual block"); setBlacklist(await api.listBlacklist()); setBlockedPhone(""); notify("Number blocked"); }} className="btn-secondary">Add</button></div>{blacklist.length ? <div className="mt-3 max-h-44 space-y-2 overflow-auto">{blacklist.map((item) => <div key={item.id} className="flex items-center justify-between rounded-lg bg-slate-50 px-2.5 py-2"><span className="truncate text-[11px] font-semibold text-slate-600">{item.phone}</span><button onClick={async () => { await api.removeBlacklist(item.id); setBlacklist((items) => items.filter((entry) => entry.id !== item.id)); notify("Number removed from do-not-contact list"); }} className="text-slate-400 hover:text-rose-500" aria-label={`Remove ${item.phone} from blacklist`}><X size={13} /></button></div>)}</div> : <p className="mt-3 text-[11px] text-slate-400">No blocked numbers</p>}</section><section className="panel border-rose-200 p-5"><h2 className="text-sm font-bold text-rose-700">Danger zone</h2><p className="mt-2 text-xs leading-5 text-slate-500">Clear local campaign data or reset this application. This cannot be undone.</p><button onClick={async () => { if (window.confirm("Clear all WASend data? This cannot be undone.")) { await api.resetApp(); window.location.reload(); } }} className="mt-4 rounded-lg border border-rose-200 px-3 py-2 text-xs font-bold text-rose-600 hover:bg-rose-50">Reset application</button></section></aside></div>;
 }
 
-function ContactModal({ onClose, onSave }) {
-  const [form, setForm] = useState({ name: "", phone: "", tags: ["lead"], custom1: "", custom2: "" });
-  return <Modal title="Add contact" sub="Add a contact who has opted in to receive messages." onClose={onClose}><div className="grid grid-cols-2 gap-4"><Field label="Full name" value={form.name} onChange={(v) => setForm({ ...form, name: v })} /><Field label="Phone number" value={form.phone} onChange={(v) => setForm({ ...form, phone: v })} placeholder="+91 98765 43210" /><Field label="Location" value={form.custom1} onChange={(v) => setForm({ ...form, custom1: v })} /><Field label="Custom field" value={form.custom2} onChange={(v) => setForm({ ...form, custom2: v })} /></div><ModalFooter onClose={onClose} onSave={() => onSave(form)} label="Add contact" /></Modal>;
+function ContactModal({ groups, onClose, onSave }) {
+  const [form, setForm] = useState({ name: "", phone: "", tags: ["lead"], custom1: "", custom2: "", groupId: "" });
+  return <Modal title="Add contact" sub="Add a contact who has opted in to receive messages." onClose={onClose}><div className="grid grid-cols-2 gap-4"><Field label="Full name" value={form.name} onChange={(v) => setForm({ ...form, name: v })} /><Field label="Phone number" value={form.phone} onChange={(v) => setForm({ ...form, phone: v })} placeholder="+91 98765 43210" /><SelectField label="Group" value={form.groupId} onChange={(v) => setForm({ ...form, groupId: v })} options={[["", "No group"], ...groups.map((group) => [String(group.id), group.name])]} /><Field label="Location" value={form.custom1} onChange={(v) => setForm({ ...form, custom1: v })} /><Field label="Custom field" value={form.custom2} onChange={(v) => setForm({ ...form, custom2: v })} /></div><ModalFooter onClose={onClose} onSave={() => onSave(form)} label="Add contact" /></Modal>;
 }
 
 function TemplateModal({ onClose, onSave }) {
@@ -373,23 +406,39 @@ function TemplateModal({ onClose, onSave }) {
   return <Modal title="Create template" sub="Personalize messages with variables such as {{name}} and {{phone}}." onClose={onClose}><Field label="Template name" value={form.name} onChange={(v) => setForm({ ...form, name: v })} /><label className="label mt-4">Message body</label><textarea className="input h-40 resize-none leading-6" value={form.body} onChange={(e) => setForm({ ...form, body: e.target.value })} /><div className="mt-2 flex justify-between text-[11px] text-slate-400"><span>*bold* · _italic_ · ~strike~</span><span>{form.body.length} characters</span></div><ModalFooter onClose={onClose} onSave={() => onSave(form)} label="Save template" /></Modal>;
 }
 
-function ImportModal({ onClose, onImport, onImportFile }) {
+function ImportModal({ groups, onClose, onImport, onImportFile }) {
   const [raw, setRaw] = useState("");
   const [mode, setMode] = useState("paste");
+  const [groupId, setGroupId] = useState("");
+  const [groupName, setGroupName] = useState("");
   const imported = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  return <Modal title="Import contacts" sub="Choose a file, paste phone numbers, or import a public Google Sheet." onClose={onClose}><div className="grid grid-cols-3 gap-3"><button onClick={onImportFile} className="btn-secondary justify-center py-3"><Upload size={16} /> CSV / Excel</button><button onClick={() => setMode("paste")} className={cx("btn-secondary justify-center py-3", mode === "paste" && "border-emerald bg-emerald-50")}><FileText size={16} /> Paste numbers</button><button onClick={() => setMode("sheets")} className={cx("btn-secondary justify-center py-3", mode === "sheets" && "border-emerald bg-emerald-50")}><File size={16} /> Sheets URL</button></div><label className="label mt-4">{mode === "sheets" ? "Public Google Sheets URL" : "Paste phone numbers"}</label>{mode === "sheets" ? <input value={raw} onChange={(e) => setRaw(e.target.value)} className="input" placeholder="https://docs.google.com/spreadsheets/d/..." /> : <textarea value={raw} onChange={(e) => setRaw(e.target.value)} className="input h-36 resize-none" placeholder={"9876543210\n9123456780"} />}<p className="mt-2 text-xs text-slate-400">{mode === "sheets" ? "The sheet needs public link sharing and name / phone columns." : `${imported.length} rows detected. Duplicates will be updated.`}</p><ModalFooter onClose={onClose} onSave={() => onImport({ type: mode, content: raw })} label="Import contacts" /></Modal>;
+  return <Modal title="Import contacts" sub="Choose a file, paste phone numbers, or import a public Google Sheet." onClose={onClose}><div className="grid grid-cols-3 gap-3"><button onClick={onImportFile} className="btn-secondary justify-center py-3"><Upload size={16} /> CSV / Excel</button><button onClick={() => setMode("paste")} className={cx("btn-secondary justify-center py-3", mode === "paste" && "border-emerald bg-emerald-50")}><FileText size={16} /> Paste numbers</button><button onClick={() => setMode("sheets")} className={cx("btn-secondary justify-center py-3", mode === "sheets" && "border-emerald bg-emerald-50")}><File size={16} /> Sheets URL</button></div><div className="mt-4 grid grid-cols-2 gap-3"><SelectField label="Assign to group" value={groupId} onChange={(v) => { setGroupId(v); setGroupName(""); }} options={[["", "No group"], ...groups.map((group) => [String(group.id), group.name])]} /><Field label="Or new group" value={groupName} onChange={(v) => { setGroupName(v); setGroupId(""); }} placeholder="e.g. June leads" /></div><label className="label mt-4">{mode === "sheets" ? "Public Google Sheets URL" : "Paste phone numbers"}</label>{mode === "sheets" ? <input value={raw} onChange={(e) => setRaw(e.target.value)} className="input" placeholder="https://docs.google.com/spreadsheets/d/..." /> : <textarea value={raw} onChange={(e) => setRaw(e.target.value)} className="input h-36 resize-none" placeholder={"9876543210\n9123456780"} />}<p className="mt-2 text-xs text-slate-400">{mode === "sheets" ? "The sheet needs public link sharing and name / phone columns." : `${imported.length} rows detected. Duplicates will be updated.`}</p><ModalFooter onClose={onClose} onSave={() => onImport({ type: mode, content: raw, groupId, groupName })} label="Import contacts" /></Modal>;
 }
 
-function CampaignWizard({ contacts, templates, media, connection, onClose, onLaunch }) {
+function ImportMapModal({ preview, groups, onClose, onImport }) {
+  const headers = preview.headers || [];
+  const guess = (names) => headers.find((header) => names.some((name) => header.toLowerCase().includes(name))) || "";
+  const [mapping, setMapping] = useState({ name: guess(["name"]), phone: guess(["phone", "mobile", "number"]), tags: guess(["tag"]), custom1: "", custom2: "" });
+  const [groupId, setGroupId] = useState("");
+  const [groupName, setGroupName] = useState("");
+  const options = [["", "Do not import"], ...headers.map((header) => [header, header])];
+  return <Modal wide title="Map contact fields" sub={`${preview.totalRows} rows found. Choose which columns become contact fields.`} onClose={onClose}><div className="grid grid-cols-2 gap-4"><SelectField label="Name column" value={mapping.name} onChange={(v) => setMapping({ ...mapping, name: v })} options={options} /><SelectField label="Phone column" value={mapping.phone} onChange={(v) => setMapping({ ...mapping, phone: v })} options={options} /><SelectField label="Tags column" value={mapping.tags} onChange={(v) => setMapping({ ...mapping, tags: v })} options={options} /><SelectField label="Location/custom 1" value={mapping.custom1} onChange={(v) => setMapping({ ...mapping, custom1: v })} options={options} /><SelectField label="Custom 2" value={mapping.custom2} onChange={(v) => setMapping({ ...mapping, custom2: v })} options={options} /><SelectField label="Assign to group" value={groupId} onChange={(v) => { setGroupId(v); setGroupName(""); }} options={[["", "No group"], ...groups.map((group) => [String(group.id), group.name])]} /><Field label="Or new group" value={groupName} onChange={(v) => { setGroupName(v); setGroupId(""); }} placeholder="e.g. Imported leads" /></div><div className="mt-5 overflow-hidden rounded-lg border border-slate-200"><table className="w-full text-xs"><thead className="bg-slate-50"><tr>{headers.slice(0, 6).map((header) => <th key={header} className="table-head px-3 py-2">{header}</th>)}</tr></thead><tbody>{preview.rows.map((row, index) => <tr key={index} className="border-t border-slate-100">{headers.slice(0, 6).map((header) => <td key={header} className="max-w-[150px] truncate px-3 py-2 text-slate-500">{row[header]}</td>)}</tr>)}</tbody></table></div><ModalFooter onClose={onClose} onSave={() => onImport({ mapping, groupId, groupName })} label="Import mapped contacts" /></Modal>;
+}
+
+function CampaignWizard({ contacts, groups, templates, media, connection, onClose, onLaunch }) {
   const [step, setStep] = useState(1);
-  const [form, setForm] = useState({ name: "", templateId: templates[0]?.id || "", total: contacts.length, delay: "8-15 seconds", consent: false, mediaPath: "", scheduledAt: "", recurrence: "none", typingSimulation: false });
+  const [form, setForm] = useState({ name: "", templateId: templates[0]?.id || "", recipientMode: "all", groupId: "", selectedContactIds: contacts.map((contact) => contact.id), total: contacts.length, delay: "8-15 seconds", consent: false, mediaPath: "", scheduledAt: "", recurrence: "none", typingSimulation: false });
+  const [sendSettings, setSendSettings] = useState({ minDelay: 8, maxDelay: 15, batch: 40, pause: 5, maxSession: 500 });
   const steps = ["Name", "Contacts", "Message", "Attachment", "Settings", "Review"];
+  useEffect(() => { api.getSettings().then((settings) => setSendSettings((current) => ({ ...current, ...settings }))).catch(() => {}); }, []);
   const selectedTemplate = templates.find((template) => String(template.id) === String(form.templateId));
+  const selectedContactIds = form.recipientMode === "all" ? contacts.map((contact) => contact.id) : form.recipientMode === "group" ? contacts.filter((contact) => (contact.groups || []).some((group) => String(group.id) === String(form.groupId))).map((contact) => contact.id) : form.selectedContactIds;
+  const selectedCount = selectedContactIds.length;
   const scheduledDate = form.scheduledAt ? new Date(form.scheduledAt) : null;
   const hasValidSchedule = !form.scheduledAt || !Number.isNaN(scheduledDate.getTime());
   const isScheduled = Boolean(form.scheduledAt && hasValidSchedule);
   const issues = [
-    contacts.length === 0 && "Add at least one opted-in contact.",
+    selectedCount === 0 && "Select at least one recipient.",
     templates.length === 0 && "Create a message template.",
     !selectedTemplate && templates.length > 0 && "Select a message template.",
     !hasValidSchedule && "Choose a valid schedule date and time.",
@@ -404,24 +453,42 @@ function CampaignWizard({ contacts, templates, media, connection, onClose, onLau
       status: isScheduled ? "Scheduled" : "Draft",
       templateId: form.templateId,
       scheduledAt: isScheduled ? scheduledDate.toISOString() : null,
-      settings: { mediaPath: form.mediaPath, recurrence: form.recurrence, typingSimulation: form.typingSimulation },
-      total: contacts.length,
+      groupId: form.recipientMode === "group" ? form.groupId : null,
+      settings: { mediaPath: form.mediaPath, recurrence: form.recurrence, typingSimulation: form.typingSimulation, selectedContactIds: form.recipientMode === "selected" ? selectedContactIds : [] },
+      total: selectedCount,
       sent: 0,
       failed: 0,
-      pending: contacts.length,
+      pending: selectedCount,
       progress: 0,
       date: form.scheduledAt || "Not launched",
     });
   };
   return <Modal wide title="Create campaign" sub="Build a careful, opt-in send in six steps." onClose={onClose}><div className="mb-6 flex items-center">{steps.map((label, i) => <div key={label} className="flex flex-1 items-center"><div className={cx("flex h-7 w-7 items-center justify-center rounded-full text-[11px] font-bold", step >= i + 1 ? "bg-emerald text-white" : "bg-slate-100 text-slate-400")}>{step > i + 1 ? <Check size={14} /> : i + 1}</div><span className="ml-2 text-[11px] font-semibold text-slate-500">{label}</span>{i < 5 && <div className="mx-2 h-px flex-1 bg-slate-200" />}</div>)}</div>
     <div className="min-h-[210px]">{step === 1 && <div><h3 className="text-sm font-bold">Name your campaign</h3><p className="mt-1 text-xs text-slate-500">Use a descriptive internal name for your records.</p><div className="mt-5 max-w-md"><Field label="Campaign name" value={form.name} onChange={(name) => setForm({ ...form, name })} placeholder="e.g. June customer update" /></div></div>}
-      {step === 2 && <WizardChoice title="Choose recipients" text={`${contacts.length} opted-in contacts currently available`} icon={Users} />}
+      {step === 2 && <RecipientPicker contacts={contacts} groups={groups} form={form} setForm={setForm} selectedCount={selectedCount} />}
       {step === 3 && <div><h3 className="text-sm font-bold">Select a message template</h3>{templates.length ? <div className="mt-4 grid grid-cols-2 gap-3">{templates.map((t) => <button key={t.id} onClick={() => setForm({ ...form, templateId: t.id })} className={cx("rounded-lg border p-3 text-left text-xs", String(form.templateId) === String(t.id) ? "border-emerald bg-emerald-50" : "border-slate-200")}><b>{t.name}</b><p className="mt-2 line-clamp-2 whitespace-pre-line text-slate-500">{t.body}</p></button>)}</div> : <EmptyState icon={MessageSquareText} title="No templates yet" text="Create a reusable message template before launching a campaign." compact />}</div>}
       {step === 4 && <div><h3 className="text-sm font-bold">Attachment is optional</h3><p className="mt-1 text-xs text-slate-500">Choose one reusable file or continue without an attachment.</p><div className="mt-4 grid grid-cols-3 gap-3"><button onClick={() => setForm({ ...form, mediaPath: "" })} className={cx("rounded-lg border p-3 text-left text-xs", !form.mediaPath ? "border-emerald bg-emerald-50" : "border-slate-200")}><b>No attachment</b></button>{media.slice(0, 5).map((file) => <button key={file.id} onClick={() => setForm({ ...form, mediaPath: file.filepath || file.name })} className={cx("truncate rounded-lg border p-3 text-left text-xs", form.mediaPath === (file.filepath || file.name) ? "border-emerald bg-emerald-50" : "border-slate-200")}><b>{file.filename || file.name}</b></button>)}</div></div>}
-      {step === 5 && <div><h3 className="text-sm font-bold">Sending settings</h3><div className="mt-4 grid grid-cols-3 gap-3"><Metric label="Pacing" value={form.delay} /><Metric label="Batch size" value="40" /><Metric label="Session cap" value="500" /></div><div className="mt-4 grid grid-cols-2 gap-3"><label><span className="label">Schedule start (optional)</span><input type="datetime-local" value={form.scheduledAt} onChange={(e) => setForm({ ...form, scheduledAt: e.target.value })} className="input" /></label><label><span className="label">Repeat</span><select value={form.recurrence} onChange={(e) => setForm({ ...form, recurrence: e.target.value })} className="input"><option value="none">Do not repeat</option><option value="daily">Daily</option><option value="weekly">Weekly</option></select></label></div><label className="mt-4 flex items-center gap-2 text-xs text-slate-600"><input type="checkbox" checked={form.typingSimulation} onChange={(e) => setForm({ ...form, typingSimulation: e.target.checked })} className="accent-emerald" /> Add a short typing pause before sending</label></div>}
-      {step === 6 && <div><h3 className="text-sm font-bold">Review and confirm</h3><div className="mt-4 rounded-lg bg-slate-50 p-4 text-xs text-slate-600"><div className="grid grid-cols-2 gap-3"><span>Campaign <b className="block text-slate-800">{form.name || "Untitled campaign"}</b></span><span>Recipients <b className="block text-slate-800">{contacts.length} contacts</b></span><span>Message <b className="block text-slate-800">{selectedTemplate?.name || "No template selected"}</b></span><span>Start <b className="block text-slate-800">{isScheduled ? formatDate(form.scheduledAt) : "Launch now"}</b></span></div><label className="mt-5 flex items-start gap-2"><input type="checkbox" checked={form.consent} onChange={(e) => setForm({ ...form, consent: e.target.checked })} className="mt-0.5 accent-emerald" /><span>I confirm these recipients opted in and this send complies with applicable policies.</span></label>{issues.length > 0 && <div className="mt-4 rounded-lg bg-amber-50 px-3 py-2 text-amber-800">{issues[0]}</div>}</div></div>}</div>
+      {step === 5 && <div><h3 className="text-sm font-bold">Sending settings</h3><div className="mt-4 grid grid-cols-3 gap-3"><Metric label="Pacing" value={`${sendSettings.minDelay}-${sendSettings.maxDelay} seconds`} /><Metric label="Batch size" value={sendSettings.batch} /><Metric label="Session cap" value={sendSettings.maxSession} /></div><div className="mt-4 grid grid-cols-2 gap-3"><label><span className="label">Schedule start (optional)</span><input type="datetime-local" value={form.scheduledAt} onChange={(e) => setForm({ ...form, scheduledAt: e.target.value })} className="input" /></label><label><span className="label">Repeat</span><select value={form.recurrence} onChange={(e) => setForm({ ...form, recurrence: e.target.value })} className="input"><option value="none">Do not repeat</option><option value="daily">Daily</option><option value="weekly">Weekly</option></select></label></div><label className="mt-4 flex items-center gap-2 text-xs text-slate-600"><input type="checkbox" checked={form.typingSimulation} onChange={(e) => setForm({ ...form, typingSimulation: e.target.checked })} className="accent-emerald" /> Add a short typing pause before sending</label><p className="mt-3 text-[11px] text-slate-400">Edit pacing, batch pauses, retries, and session caps in Settings. These values are enforced by the backend scheduler when the campaign runs.</p></div>}
+      {step === 6 && <div><h3 className="text-sm font-bold">Review and confirm</h3><div className="mt-4 rounded-lg bg-slate-50 p-4 text-xs text-slate-600"><div className="grid grid-cols-2 gap-3"><span>Campaign <b className="block text-slate-800">{form.name || "Untitled campaign"}</b></span><span>Recipients <b className="block text-slate-800">{selectedCount} contacts</b></span><span>Message <b className="block text-slate-800">{selectedTemplate?.name || "No template selected"}</b></span><span>Start <b className="block text-slate-800">{isScheduled ? formatDate(form.scheduledAt) : "Launch now"}</b></span></div><label className="mt-5 flex items-start gap-2"><input type="checkbox" checked={form.consent} onChange={(e) => setForm({ ...form, consent: e.target.checked })} className="mt-0.5 accent-emerald" /><span>I confirm these recipients opted in and this send complies with applicable policies.</span></label>{issues.length > 0 && <div className="mt-4 rounded-lg bg-amber-50 px-3 py-2 text-amber-800">{issues[0]}</div>}</div></div>}</div>
     <div className="mt-6 flex justify-between border-t border-slate-100 pt-4"><button onClick={step === 1 ? onClose : () => setStep(step - 1)} className="btn-secondary">{step === 1 ? "Cancel" : "Back"}</button><button onClick={() => step === 6 ? submitCampaign() : setStep(step + 1)} disabled={step === 6 && !canSubmit} className={cx("btn-primary", step === 6 && !canSubmit && "cursor-not-allowed opacity-50")}>{step === 6 ? (isScheduled ? "Schedule campaign" : "Launch campaign") : "Continue"} <ChevronRight size={15} /></button></div>
   </Modal>;
+}
+
+function RecipientPicker({ contacts, groups, form, setForm, selectedCount }) {
+  const toggle = (id) => {
+    const selected = new Set(form.selectedContactIds);
+    if (selected.has(id)) selected.delete(id);
+    else selected.add(id);
+    setForm({ ...form, recipientMode: "selected", selectedContactIds: [...selected] });
+  };
+  const selectAll = () => setForm({ ...form, recipientMode: "all", selectedContactIds: contacts.map((contact) => contact.id) });
+  return <div><div className="flex items-center justify-between"><div><h3 className="text-sm font-bold">Choose recipients</h3><p className="mt-1 text-xs text-slate-500">{selectedCount} of {contacts.length} contacts selected</p></div><button onClick={selectAll} className="btn-secondary"><Users size={15} /> Select all</button></div><div className="mt-4 grid grid-cols-3 gap-3"><button onClick={selectAll} className={cx("rounded-lg border p-3 text-left text-xs", form.recipientMode === "all" ? "border-emerald bg-emerald-50" : "border-slate-200")}><b>All contacts</b><p className="mt-1 text-slate-500">{contacts.length} eligible contacts</p></button><label className={cx("rounded-lg border p-3 text-left text-xs", form.recipientMode === "group" ? "border-emerald bg-emerald-50" : "border-slate-200")}><b>Group</b><select value={form.groupId} onChange={(e) => setForm({ ...form, recipientMode: "group", groupId: e.target.value })} className="input mt-2 py-2"><option value="">Choose group</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.name} ({group.contacts || 0})</option>)}</select></label><button onClick={() => setForm({ ...form, recipientMode: "selected" })} className={cx("rounded-lg border p-3 text-left text-xs", form.recipientMode === "selected" ? "border-emerald bg-emerald-50" : "border-slate-200")}><b>Manual selection</b><p className="mt-1 text-slate-500">Pick individual contacts</p></button></div><div className="mt-4 max-h-52 overflow-auto rounded-lg border border-slate-200">{contacts.length ? contacts.map((contact) => <label key={contact.id} className="flex items-center gap-3 border-b border-slate-100 px-3 py-2 text-xs last:border-0"><input type="checkbox" checked={selectedContactIdsFor(form, contacts).includes(contact.id)} onChange={() => toggle(contact.id)} className="accent-emerald" /><Avatar name={contact.name} /><span className="min-w-0 flex-1"><b className="block truncate text-slate-700">{contact.name || "Unnamed contact"}</b><span className="text-slate-400">{contact.phone}</span></span><span className="hidden max-w-[180px] truncate text-slate-400 xl:block">{(contact.groups || []).map((group) => group.name).join(", ")}</span></label>) : <EmptyState icon={ContactRound} title="No contacts yet" text="Import contacts before launching a campaign." compact />}</div></div>;
+}
+
+function selectedContactIdsFor(form, contacts) {
+  if (form.recipientMode === "all") return contacts.map((contact) => contact.id);
+  if (form.recipientMode === "group") return contacts.filter((contact) => (contact.groups || []).some((group) => String(group.id) === String(form.groupId))).map((contact) => contact.id);
+  return form.selectedContactIds;
 }
 
 function ConnectionModal({ connection, onClose, onConnect, onDisconnect }) {
@@ -457,13 +524,28 @@ function formatDate(value) { const date = value ? new Date(value) : null; return
 function formatNotificationTime(value) { return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
 function timezoneOptions(current) { return [...new Set([current, "Asia/Kolkata", "UTC", "America/New_York", "Europe/London", "Asia/Dubai", "Asia/Singapore", "Australia/Sydney"].filter(Boolean))]; }
 function applyTheme(theme = "light") { document.documentElement.dataset.theme = theme; }
-function lastSevenDays(timeline = []) {
+function normalizeSettings(settings) {
+  const minDelay = Math.max(Number(settings.minDelay || 8), 5);
+  const maxDelay = Math.max(Number(settings.maxDelay || 15), minDelay);
+  return {
+    ...settings,
+    minDelay,
+    maxDelay,
+    maxSession: Math.min(Math.max(Number(settings.maxSession || 500), 1), 500),
+    batch: Math.max(Number(settings.batch || 40), 1),
+    pause: Math.max(Number(settings.pause || 5), 1),
+    retries: Math.min(Math.max(Number(settings.retries ?? 1), 0), 3),
+  };
+}
+function rangeDays(timeline = [], days = 7) {
+  const length = Math.min(Math.max(Number(days || 7), 1), 90);
   const counts = new Map(timeline.map((item) => [item.day, Number(item.sent || 0)]));
-  return Array.from({ length: 7 }, (_item, index) => {
+  return Array.from({ length }, (_item, index) => {
     const date = new Date();
-    date.setDate(date.getDate() - (6 - index));
+    date.setDate(date.getDate() - (length - 1 - index));
     const day = date.toISOString().slice(0, 10);
-    return { day, sent: counts.get(day) || 0, label: date.toLocaleDateString([], { weekday: "short" }) };
+    const label = length <= 14 ? date.toLocaleDateString([], { weekday: "short" }) : date.toLocaleDateString([], { month: "short", day: "numeric" });
+    return { day, sent: counts.get(day) || 0, label };
   });
 }
 
