@@ -317,6 +317,45 @@ class WasendDatabase {
     `, params);
   }
 
+  getCampaignRecipientDiagnostics(campaignId) {
+    const campaign = this.getCampaign(campaignId);
+    if (!campaign) return { totalContacts: 0, targetContacts: 0, alreadySent: 0, blacklisted: 0, eligible: 0 };
+    const settings = JSON.parse(campaign.settings_json || "{}");
+    const selectedIds = Array.isArray(settings.selectedContactIds) ? settings.selectedContactIds.map(Number).filter(Boolean) : [];
+    const groupId = Number(campaign.group_id || settings.groupId || 0);
+    const targetFilters = [];
+    const targetParams = [];
+    if (selectedIds.length) {
+      targetFilters.push(`c.id IN (${selectedIds.map(() => "?").join(",")})`);
+      targetParams.push(...selectedIds);
+    } else if (groupId) {
+      targetFilters.push("c.id IN (SELECT contact_id FROM contact_group_members WHERE group_id = ?)");
+      targetParams.push(groupId);
+    }
+    const targetWhere = targetFilters.length ? `WHERE ${targetFilters.join(" AND ")}` : "";
+    const targetContacts = this.all(`SELECT c.id, c.phone FROM contacts c ${targetWhere}`, targetParams);
+    const targetIds = targetContacts.map((contact) => Number(contact.id));
+    const alreadySent = targetIds.length ? this.db.prepare(`
+      SELECT COUNT(DISTINCT contact_id) AS count
+      FROM campaign_logs
+      WHERE campaign_id = ? AND status = 'sent' AND contact_id IN (${targetIds.map(() => "?").join(",")})
+    `).get(campaignId, ...targetIds).count : 0;
+    const targetPhones = targetContacts.map((contact) => contact.phone).filter(Boolean);
+    const blacklisted = targetPhones.length ? this.db.prepare(`
+      SELECT COUNT(DISTINCT phone) AS count
+      FROM blacklist
+      WHERE phone IN (${targetPhones.map(() => "?").join(",")})
+    `).get(...targetPhones).count : 0;
+    return {
+      totalContacts: Number(this.db.prepare("SELECT COUNT(*) AS count FROM contacts").get().count || 0),
+      targetContacts: targetContacts.length,
+      alreadySent: Number(alreadySent || 0),
+      blacklisted: Number(blacklisted || 0),
+      eligible: this.getCampaignRecipients(campaignId).length,
+      mode: selectedIds.length ? "selected" : groupId ? "group" : "all",
+    };
+  }
+
   logCampaignContact(campaignId, contactId, status, error = null) {
     this.run("INSERT INTO campaign_logs(campaign_id, contact_id, status, error_msg, sent_at) VALUES (?, ?, ?, ?, CASE WHEN ? = 'sent' THEN CURRENT_TIMESTAMP ELSE NULL END)", [campaignId, contactId, status, error, status]);
   }

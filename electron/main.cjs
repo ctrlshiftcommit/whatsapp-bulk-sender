@@ -49,7 +49,15 @@ function registerIpc() {
     const message = String(settings.message || campaign.template_body || "").trim();
     const recipients = database.getCampaignRecipients(id);
     if (!message && !settings.mediaPath) throw new Error("Choose a message template or add campaign text before launching.");
-    if (!recipients.length) throw new Error("Add at least one non-blacklisted contact before launching.");
+    if (!recipients.length) {
+      const details = database.getCampaignRecipientDiagnostics(id);
+      if (!details.totalContacts) throw new Error("Import or add at least one contact before launching.");
+      if (!details.targetContacts && details.mode === "group") throw new Error("The selected group has no contacts. Choose a group with contacts or select all contacts.");
+      if (!details.targetContacts && details.mode === "selected") throw new Error("The selected contacts are no longer available. Create a new campaign and choose recipients again.");
+      if (details.alreadySent >= details.targetContacts) throw new Error("All recipients in this campaign were already sent successfully. Duplicate the campaign if you want to send it again.");
+      if (details.blacklisted >= details.targetContacts) throw new Error("Every selected recipient is on the do-not-contact list. Remove them from the list or choose different contacts.");
+      throw new Error("No eligible recipients were found for this campaign. Check the selected contacts, group, and do-not-contact list.");
+    }
     if (campaign.status !== "Scheduled" && whatsapp.status.status !== "connected") throw new Error("Connect WhatsApp Web before launching a campaign.");
     return settings;
   };
