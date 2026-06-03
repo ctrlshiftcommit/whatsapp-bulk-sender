@@ -59,7 +59,16 @@ const api = window.wasend || {
     return saved;
   },
   listTemplates: async () => mockStore.templates,
-  saveTemplate: async (template) => { const saved = { ...template, id: Date.now() }; mockStore.templates = [saved, ...mockStore.templates]; return saved; },
+  saveTemplate: async (template) => {
+    if (template.id) {
+      const saved = { ...template };
+      mockStore.templates = mockStore.templates.map((item) => String(item.id) === String(template.id) ? saved : item);
+      return saved;
+    }
+    const saved = { ...template, id: Date.now() };
+    mockStore.templates = [saved, ...mockStore.templates];
+    return saved;
+  },
   listCampaigns: async () => mockStore.campaigns,
   getDashboardSummary: async (days) => mockSummary(days),
   createCampaign: async (campaign) => { const saved = { ...campaign, id: Date.now() }; mockStore.campaigns = [saved, ...mockStore.campaigns]; return saved; },
@@ -75,7 +84,7 @@ const api = window.wasend || {
   addBlacklist: async (phone, reason = "") => { mockStore.blacklist = [{ id: Date.now(), phone, reason }, ...mockStore.blacklist]; return true; },
   removeBlacklist: async (id) => { mockStore.blacklist = mockStore.blacklist.filter((item) => item.id !== id); return true; },
   removeTemplate: async (id) => { mockStore.templates = mockStore.templates.filter((template) => template.id !== id); return true; },
-  duplicateTemplate: async (id) => { const template = mockStore.templates.find((item) => item.id === id); if (template) mockStore.templates = [{ ...template, id: Date.now(), name: `${template.name} copy` }, ...mockStore.templates]; return true; },
+  duplicateTemplate: async (id) => { const template = mockStore.templates.find((item) => String(item.id) === String(id)); if (template) { const saved = { ...template, id: Date.now(), name: `${template.name} copy` }; mockStore.templates = [saved, ...mockStore.templates]; return saved; } return null; },
   exportReportCsv: async () => true,
   exportReportPdf: async () => true,
   resetApp: async () => { mockStore.contacts = []; mockStore.templates = []; mockStore.campaigns = []; mockStore.media = []; mockStore.blacklist = []; return true; },
@@ -107,6 +116,7 @@ function App() {
   const [modal, setModal] = useState(null);
   const [toast, setToast] = useState(null);
   const [importPreview, setImportPreview] = useState(null);
+  const [editingTemplate, setEditingTemplate] = useState(null);
   const [onboarding, setOnboarding] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
   const [notifications, setNotifications] = useState([]);
@@ -181,21 +191,21 @@ function App() {
     notify(error?.message || fallback, "error");
   };
 
-  const context = { page, setPage, contacts, setContacts, groups, setGroups, templates, setTemplates, campaigns, setCampaigns, media, setMedia, summary, setSummary, loading, connection, setConnection, setModal, notify, reportError };
+  const context = { page, setPage, contacts, setContacts, groups, setGroups, templates, setTemplates, setEditingTemplate, campaigns, setCampaigns, media, setMedia, summary, setSummary, loading, connection, setConnection, setModal, notify, reportError };
   const Page = { Dashboard, ContactsPage, TemplatesPage, CampaignsPage, MediaPage, ReportsPage, SettingsPage }[page === "Media Library" ? "MediaPage" : `${page}Page`] || Dashboard;
 
   return (
     <div className="flex min-h-screen bg-mist">
       <Sidebar page={page} setPage={setPage} connection={connection} campaigns={campaigns} />
       <main className="ml-[238px] min-h-screen w-[calc(100%-238px)]">
-        <Header page={page} setModal={setModal} connection={connection} notifications={notifications} notificationsOpen={notificationsOpen} setNotificationsOpen={setNotificationsOpen} setNotifications={setNotifications} />
+        <Header page={page} setModal={setModal} connection={connection} notifications={notifications} notificationsOpen={notificationsOpen} setNotificationsOpen={setNotificationsOpen} setNotifications={setNotifications} onAbout={() => setAboutOpen(true)} />
         <div className="px-8 pb-10 pt-5">
           {page === "Dashboard" && <PolicyBanner />}
           <Page {...context} />
         </div>
       </main>
       {modal === "contact" && <ContactModal groups={groups} onClose={() => setModal(null)} onSave={async (contact) => { try { const saved = await api.addContact(contact); setContacts(await api.listContacts()); setGroups(await api.listGroups?.() || []); setSummary(await api.getDashboardSummary()); setModal(null); notify(saved?.id ? "Contact added successfully" : "Contact updated successfully"); } catch (error) { reportError(error, "Could not save contact"); } }} />}
-      {modal === "template" && <TemplateModal onClose={() => setModal(null)} onSave={async (template) => { try { const saved = await api.saveTemplate(template); setTemplates((items) => [{ ...template, id: saved.id || Date.now() }, ...items]); setModal(null); notify("Template saved"); } catch (error) { reportError(error, "Could not save template"); } }} />}
+      {modal === "template" && <TemplateModal template={editingTemplate} onClose={() => { setModal(null); setEditingTemplate(null); }} onSave={async (template) => { try { await api.saveTemplate(template); setTemplates(await api.listTemplates()); setModal(null); setEditingTemplate(null); notify(template.id ? "Template updated" : "Template saved"); } catch (error) { reportError(error, "Could not save template"); } }} />}
       {modal === "campaign" && <CampaignWizard contacts={contacts} groups={groups} templates={templates} media={media} connection={connection} onClose={() => setModal(null)} onLaunch={async (campaign) => { try { const saved = await api.createCampaign(campaign); if (!campaign.scheduledAt) await api.startCampaign(saved.id); setCampaigns(await api.listCampaigns()); setSummary(await api.getDashboardSummary()); setPage("Campaigns"); setModal(null); notify(campaign.scheduledAt ? "Campaign scheduled" : "Campaign launched"); } catch (error) { reportError(error, "Could not launch campaign"); } }} />}
       {modal === "import" && <ImportModal groups={groups} onClose={() => setModal(null)} onImport={async (payload) => { try { const settings = await api.getSettings(); const added = await api.importContacts({ ...payload, defaultCountryCode: String(settings.country || "91").replace(/\D/g, "") }); setContacts(await api.listContacts()); setGroups(await api.listGroups?.() || []); setSummary(await api.getDashboardSummary()); setModal(null); notify(`${added.length} contacts imported`); } catch (error) { reportError(error, "Could not import contacts"); } }} onImportFile={async () => { try { const preview = await api.previewContactFile?.(); if (preview) { setImportPreview(preview); setModal("import-map"); } } catch (error) { reportError(error, "Could not open contact file"); } }} />}
       {modal === "import-map" && importPreview && <ImportMapModal preview={importPreview} groups={groups} onClose={() => { setModal(null); setImportPreview(null); }} onImport={async (payload) => { try { const settings = await api.getSettings(); const added = await api.importContactFile({ ...importPreview, ...payload, defaultCountryCode: String(settings.country || "91").replace(/\D/g, "") }); setContacts(await api.listContacts()); setGroups(await api.listGroups?.() || []); setSummary(await api.getDashboardSummary()); setModal(null); setImportPreview(null); notify(`${added.length} contacts imported`); } catch (error) { reportError(error, "Could not import contacts"); } }} />}
@@ -203,7 +213,6 @@ function App() {
       {onboarding && <Onboarding onClose={() => setOnboarding(false)} setModal={setModal} />}
       {aboutOpen && <AboutModal onClose={() => setAboutOpen(false)} />}
       {toast && <Toast {...toast} />}
-      <button onClick={() => setAboutOpen(true)} className="fixed bottom-5 right-[68px] flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-600 shadow-lg transition hover:scale-105 hover:text-emerald" aria-label="About WASend"><Info size={18} /></button>
       <button onClick={() => setOnboarding(true)} className="fixed bottom-5 right-5 flex h-10 w-10 items-center justify-center rounded-full bg-navy text-white shadow-lg transition hover:scale-105" aria-label="Open onboarding"><CircleHelp size={18} /></button>
     </div>
   );
@@ -228,7 +237,7 @@ function Sidebar({ page, setPage, connection, campaigns }) {
   </aside>;
 }
 
-function Header({ page, setModal, connection, notifications, notificationsOpen, setNotificationsOpen, setNotifications }) {
+function Header({ page, setModal, connection, notifications, notificationsOpen, setNotificationsOpen, setNotifications, onAbout }) {
   const profileName = connection.profileName || "Connect WhatsApp";
   const profileInitials = connection.profileName ? initials(connection.profileName) : "--";
   const unread = notifications.filter((item) => !item.read).length;
@@ -242,6 +251,7 @@ function Header({ page, setModal, connection, notifications, notificationsOpen, 
     <div><h1 className="text-xl font-bold text-ink">{page}</h1><p className="mt-1 text-xs text-slate-500">{page === "Dashboard" ? "Welcome back. Here is what is happening today." : `Manage your ${page.toLowerCase()} in one place.`}</p></div>
     <div className="flex items-center gap-3">
       <button onClick={() => setModal("campaign")} className="btn-primary"><Plus size={16} /> New Campaign</button>
+      <button onClick={onAbout} className="inline-flex h-10 items-center gap-2 rounded-full border border-emerald/20 bg-emerald-50 px-3 text-xs font-bold text-emerald-700 transition hover:border-emerald hover:bg-emerald-100" aria-label="About WASend" title="About WASend"><Info size={17} /> About</button>
       <div className="relative">
         <button onClick={toggleNotifications} className="relative flex h-10 w-10 items-center justify-center rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50" aria-label="Open notifications" aria-expanded={notificationsOpen}><Bell size={17} />{unread > 0 && <span className="absolute -right-1.5 -top-1.5 flex min-h-4 min-w-4 items-center justify-center rounded-full bg-rose-500 px-1 text-[9px] font-bold text-white">{unread > 9 ? "9+" : unread}</span>}</button>
         {notificationsOpen && <NotificationCenter notifications={notifications} onClear={() => setNotifications([])} />}
@@ -325,24 +335,68 @@ function ConnectionCard({ connection, setModal }) {
   </section>;
 }
 
-function ContactsPage({ contacts, setContacts, groups, setGroups, setModal, setSummary, notify }) {
+function ContactsPage({ contacts, setContacts, groups, setGroups, setModal, setSummary, notify, reportError }) {
   const [query, setQuery] = useState("");
+  const [creatingGroup, setCreatingGroup] = useState(false);
+  const [groupName, setGroupName] = useState("");
   const shown = contacts.filter((c) => `${c.name} ${c.phone} ${c.tags.join(" ")} ${(c.groups || []).map((group) => group.name).join(" ")}`.toLowerCase().includes(query.toLowerCase()));
+  const createGroup = async () => {
+    try {
+      if (!creatingGroup) {
+        setCreatingGroup(true);
+        return;
+      }
+      await api.createGroup(groupName);
+      setGroups(await api.listGroups?.() || []);
+      setGroupName("");
+      setCreatingGroup(false);
+      notify("Group created");
+    } catch (error) {
+      reportError(error, "Could not create group");
+    }
+  };
   return <div className="space-y-5">
     <div className="flex items-center justify-between"><p className="text-sm text-slate-500">{contacts.length} saved contacts with opt-in records and tags.</p><div className="flex gap-2"><button onClick={async () => { await api.exportContacts(); notify("Contacts exported to CSV"); }} className="btn-secondary"><Download size={16} /> Export</button><button onClick={() => setModal("import")} className="btn-secondary"><Import size={16} /> Import</button><button onClick={() => setModal("contact")} className="btn-primary"><Plus size={16} /> Add Contact</button></div></div>
-    <section className="panel p-4"><div className="flex items-center justify-between"><SectionTitle title="Contact groups" sub="Use groups to target categories during campaign launch." /><button onClick={async () => { const name = window.prompt("New group name"); if (name) { await api.createGroup(name); setGroups(await api.listGroups?.() || []); notify("Group created"); } }} className="btn-secondary"><Plus size={15} /> New group</button></div><div className="mt-3 flex flex-wrap gap-2">{groups.length ? groups.map((group) => <span key={group.id} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-600">{group.name} <span className="text-slate-400">{Number(group.contacts || 0)}</span></span>) : <span className="text-xs text-slate-400">No groups yet</span>}</div></section>
+    <section className="panel p-4"><div className="flex items-center justify-between gap-3"><SectionTitle title="Contact groups" sub="Use groups to target categories during campaign launch." /><div className="flex items-center gap-2">{creatingGroup && <input autoFocus value={groupName} onChange={(event) => setGroupName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") createGroup(); if (event.key === "Escape") { setCreatingGroup(false); setGroupName(""); } }} className="input w-48 py-2" placeholder="Group name" />}<button onClick={createGroup} className="btn-secondary"><Plus size={15} /> {creatingGroup ? "Save group" : "New group"}</button>{creatingGroup && <button onClick={() => { setCreatingGroup(false); setGroupName(""); }} className="text-slate-400 hover:text-slate-700" aria-label="Cancel group creation"><X size={16} /></button>}</div></div><div className="mt-3 flex flex-wrap gap-2">{groups.length ? groups.map((group) => <span key={group.id} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-600">{group.name} <span className="text-slate-400">{Number(group.contacts || 0)}</span></span>) : <span className="text-xs text-slate-400">No groups yet</span>}</div></section>
     <section className="panel overflow-hidden"><div className="flex items-center justify-between border-b border-slate-100 p-4"><SearchBox value={query} setValue={setQuery} placeholder="Search name, phone, or tag" /><button className="btn-secondary"><ListFilter size={15} /> Filter</button></div>
       {shown.length ? <table className="w-full"><thead className="border-b border-slate-100 bg-slate-50"><tr>{["Contact", "Phone number", "Groups", "Tags", "Location", "Plan", ""].map((h) => <th key={h} className="table-head px-4 py-3">{h}</th>)}</tr></thead><tbody>{shown.map((contact) => <tr key={contact.id} className="border-b border-slate-100 text-xs hover:bg-slate-50/70"><td className="px-4 py-3"><div className="flex items-center gap-2.5"><Avatar name={contact.name} /><b>{contact.name || "Unnamed contact"}</b></div></td><td className="px-4 py-3 text-slate-600">{contact.phone}</td><td className="px-4 py-3"><div className="flex gap-1">{(contact.groups || []).map((group) => <Tag key={group.id}>{group.name}</Tag>)}</div></td><td className="px-4 py-3"><div className="flex gap-1">{contact.tags.map((tag) => <Tag key={tag}>{tag}</Tag>)}</div></td><td className="px-4 py-3 text-slate-500">{contact.custom1}</td><td className="px-4 py-3 text-slate-500">{contact.custom2}</td><td className="px-4 py-3 text-right"><button onClick={async () => { await api.removeContact(contact.id); setContacts((items) => items.filter((x) => x.id !== contact.id)); setSummary(await api.getDashboardSummary()); notify("Contact removed", "warning"); }} className="text-slate-400 hover:text-rose-500"><Trash2 size={15} /></button></td></tr>)}</tbody></table> : <EmptyState icon={ContactRound} title={query ? "No matching contacts" : "No contacts yet"} text={query ? "Try a different search term." : "Import a list or add an opted-in contact manually."} />}
     </section>
   </div>;
 }
 
-function TemplatesPage({ templates, setTemplates, setModal, notify }) {
-  return <div><div className="mb-5 flex items-center justify-between"><p className="text-sm text-slate-500">Reusable, personalized messages for your approved contacts.</p><button onClick={() => setModal("template")} className="btn-primary"><Plus size={16} /> New Template</button></div>
-    {templates.length ? <div className="grid grid-cols-3 gap-4">{templates.map((template) => <section key={template.id} className="panel flex min-h-[226px] flex-col p-4">
-      <div className="flex items-start justify-between"><span className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-50 text-emerald"><MessageSquareText size={17} /></span><button className="text-slate-400"><MoreHorizontal size={17} /></button></div>
+function TemplatesPage({ templates, setTemplates, setModal, setEditingTemplate, notify, reportError }) {
+  const [openMenuId, setOpenMenuId] = useState(null);
+  const refreshTemplates = async () => setTemplates(await api.listTemplates());
+  const editTemplate = (template) => {
+    setEditingTemplate(template);
+    setOpenMenuId(null);
+    setModal("template");
+  };
+  const duplicateTemplate = async (template) => {
+    try {
+      await api.duplicateTemplate(template.id);
+      await refreshTemplates();
+      setOpenMenuId(null);
+      notify("Template duplicated");
+    } catch (error) {
+      reportError(error, "Could not duplicate template");
+    }
+  };
+  const deleteTemplate = async (template) => {
+    try {
+      await api.removeTemplate(template.id);
+      await refreshTemplates();
+      setOpenMenuId(null);
+      notify("Template deleted", "warning");
+    } catch (error) {
+      reportError(error, "Could not delete template");
+    }
+  };
+  return <div><div className="mb-5 flex items-center justify-between"><p className="text-sm text-slate-500">Reusable, personalized messages for your approved contacts.</p><button onClick={() => { setEditingTemplate(null); setModal("template"); }} className="btn-primary"><Plus size={16} /> New Template</button></div>
+    {templates.length ? <div className="grid grid-cols-3 gap-4">{templates.map((template) => <section key={template.id} onClick={() => editTemplate(template)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") editTemplate(template); }} role="button" tabIndex={0} className="panel flex min-h-[226px] cursor-pointer flex-col p-4 transition hover:border-emerald/40 hover:shadow-md">
+      <div className="flex items-start justify-between"><span className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-50 text-emerald"><MessageSquareText size={17} /></span><div className="relative"><button onClick={(event) => { event.stopPropagation(); setOpenMenuId((id) => id === template.id ? null : template.id); }} className="text-slate-400 hover:text-slate-700" aria-label={`Open actions for ${template.name}`} aria-expanded={openMenuId === template.id}><MoreHorizontal size={17} /></button>{openMenuId === template.id && <div onClick={(event) => event.stopPropagation()} className="absolute right-0 top-7 z-10 w-36 rounded-lg border border-slate-200 bg-white py-1 text-xs font-semibold text-slate-600 shadow-lg"><button onClick={() => editTemplate(template)} className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-slate-50"><Pencil size={13} /> Edit</button><button onClick={() => duplicateTemplate(template)} className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-slate-50"><Copy size={13} /> Duplicate</button><button onClick={() => deleteTemplate(template)} className="flex w-full items-center gap-2 px-3 py-2 text-left text-rose-600 hover:bg-rose-50"><Trash2 size={13} /> Delete</button></div>}</div></div>
       <h3 className="mt-4 text-sm font-bold text-slate-800">{template.name}</h3><p className="mt-1 text-[11px] font-semibold text-emerald-700">{template.category}</p><p className="mt-3 line-clamp-3 whitespace-pre-line text-xs leading-5 text-slate-500">{template.body}</p>
-      <div className="mt-auto flex items-center justify-between pt-4 text-slate-400"><span className="text-[11px]">{template.body.length} characters</span><div className="flex gap-2"><button onClick={async () => { await api.duplicateTemplate(template.id); setTemplates((items) => [{ ...template, id: Date.now(), name: `${template.name} copy` }, ...items]); notify("Template duplicated"); }} className="hover:text-emerald" aria-label="Duplicate template"><Copy size={14} /></button><button onClick={async () => { await api.removeTemplate(template.id); setTemplates((items) => items.filter((x) => x.id !== template.id)); notify("Template deleted", "warning"); }} className="hover:text-rose-500" aria-label="Delete template"><Trash2 size={14} /></button></div></div>
+      <div className="mt-auto flex items-center justify-between pt-4 text-slate-400"><span className="text-[11px]">{template.body.length} characters</span><div className="flex gap-2"><button onClick={(event) => { event.stopPropagation(); editTemplate(template); }} className="hover:text-emerald" aria-label="Edit template"><Pencil size={14} /></button><button onClick={(event) => { event.stopPropagation(); duplicateTemplate(template); }} className="hover:text-emerald" aria-label="Duplicate template"><Copy size={14} /></button><button onClick={(event) => { event.stopPropagation(); deleteTemplate(template); }} className="hover:text-rose-500" aria-label="Delete template"><Trash2 size={14} /></button></div></div>
     </section>)}</div> : <section className="panel"><EmptyState icon={MessageSquareText} title="No templates yet" text="Create a reusable message template for your first campaign." /></section>}
   </div>;
 }
@@ -404,9 +458,10 @@ function ContactModal({ groups, onClose, onSave }) {
   return <Modal title="Add contact" sub="Add a contact who has opted in to receive messages." onClose={onClose}><div className="grid grid-cols-2 gap-4"><Field label="Full name" value={form.name} onChange={(v) => setForm({ ...form, name: v })} /><Field label="Phone number" value={form.phone} onChange={(v) => setForm({ ...form, phone: v })} placeholder="+91 98765 43210" /><SelectField label="Group" value={form.groupId} onChange={(v) => setForm({ ...form, groupId: v })} options={[["", "No group"], ...groups.map((group) => [String(group.id), group.name])]} /><Field label="Location" value={form.custom1} onChange={(v) => setForm({ ...form, custom1: v })} /><Field label="Custom field" value={form.custom2} onChange={(v) => setForm({ ...form, custom2: v })} /></div><ModalFooter onClose={onClose} onSave={() => onSave(form)} label="Add contact" /></Modal>;
 }
 
-function TemplateModal({ onClose, onSave }) {
-  const [form, setForm] = useState({ name: "", category: "Follow-up", body: "" });
-  return <Modal title="Create template" sub="Personalize messages with variables such as {{name}} and {{phone}}." onClose={onClose}><Field label="Template name" value={form.name} onChange={(v) => setForm({ ...form, name: v })} /><label className="label mt-4">Message body</label><textarea className="input h-40 resize-none leading-6" value={form.body} onChange={(e) => setForm({ ...form, body: e.target.value })} /><div className="mt-2 flex justify-between text-[11px] text-slate-400"><span>*bold* · _italic_ · ~strike~</span><span>{form.body.length} characters</span></div><ModalFooter onClose={onClose} onSave={() => onSave(form)} label="Save template" /></Modal>;
+function TemplateModal({ template, onClose, onSave }) {
+  const [form, setForm] = useState({ id: template?.id, name: template?.name || "", category: template?.category || "Follow-up", body: template?.body || "" });
+  const editing = Boolean(template?.id);
+  return <Modal title={editing ? "Edit template" : "Create template"} sub="Personalize messages with variables such as {{name}} and {{phone}}." onClose={onClose}><Field label="Template name" value={form.name} onChange={(v) => setForm({ ...form, name: v })} autoFocus={!editing} /><div className="mt-4"><Field label="Category" value={form.category} onChange={(v) => setForm({ ...form, category: v })} /></div><label htmlFor="template-body" className="label mt-4">Message body</label><textarea id="template-body" autoFocus={editing} className="input h-40 resize-none leading-6" value={form.body} onChange={(e) => setForm({ ...form, body: e.target.value })} /><div className="mt-2 flex justify-between text-[11px] text-slate-400"><span>*bold* · _italic_ · ~strike~</span><span>{form.body.length} characters</span></div><ModalFooter onClose={onClose} onSave={() => onSave(form)} label={editing ? "Update template" : "Save template"} /></Modal>;
 }
 
 function ImportModal({ groups, onClose, onImport, onImportFile }) {
@@ -525,7 +580,7 @@ function Modal({ title, sub, onClose, children, wide }) {
 function ModalFooter({ onClose, onSave, label }) { return <div className="mt-6 flex justify-end gap-2 border-t border-slate-100 pt-4"><button onClick={onClose} className="btn-secondary">Cancel</button><button onClick={onSave} className="btn-primary">{label}</button></div>; }
 function SectionTitle({ title, sub, action }) { return <div className="flex items-start justify-between"><div><h2 className="text-sm font-bold text-ink">{title}</h2>{sub && <p className="mt-1 text-xs text-slate-400">{sub}</p>}</div>{action}</div>; }
 function SearchBox({ value = "", setValue = () => {}, placeholder }) { return <label className="relative block w-72"><Search size={15} className="absolute left-3 top-2.5 text-slate-400" /><input className="input py-2 pl-9" value={value} onChange={(e) => setValue(e.target.value)} placeholder={placeholder} /></label>; }
-function Field({ label, value, onChange, placeholder }) { return <label><span className="label">{label}</span><input className="input" value={value} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} /></label>; }
+function Field({ label, value, onChange, placeholder, autoFocus }) { return <label><span className="label">{label}</span><input className="input" value={value} placeholder={placeholder} autoFocus={autoFocus} onChange={(e) => onChange(e.target.value)} /></label>; }
 function SettingInput({ label, value, onChange }) { return <Field label={label} value={value} onChange={onChange} />; }
 function SelectField({ label, value, onChange, options }) { return <label><span className="label">{label}</span><select className="input" value={value} onChange={(event) => onChange(event.target.value)}>{options.map(([optionValue, optionLabel]) => <option key={optionValue} value={optionValue}>{optionLabel}</option>)}</select></label>; }
 function Toggle({ label, value, setValue }) { return <label className="flex items-center justify-between text-sm text-slate-600"><span>{label}</span><button type="button" onClick={() => setValue(!value)} className={cx("relative h-6 w-11 rounded-full transition", value ? "bg-emerald" : "bg-slate-200")}><span className={cx("absolute top-1 h-4 w-4 rounded-full bg-white transition", value ? "left-6" : "left-1")} /></button></label>; }

@@ -153,12 +153,24 @@ class WasendDatabase {
 
   listTemplates() { return this.all("SELECT * FROM templates ORDER BY created_at DESC"); }
   saveTemplate(template) {
-    const variables = [...template.body.matchAll(/\{\{(\w+)\}\}/g)].map((match) => match[1]);
-    return this.run("INSERT INTO templates(name, category, body, variables) VALUES (?, ?, ?, ?)", [template.name, template.category || "General", template.body, JSON.stringify(variables)]);
+    const name = String(template.name || "").trim();
+    const body = String(template.body || "").trim();
+    if (!name) throw new Error("Enter a template name.");
+    if (!body) throw new Error("Enter a message body.");
+    const variables = [...body.matchAll(/\{\{(\w+)\}\}/g)].map((match) => match[1]);
+    const params = [name, template.category || "General", body, JSON.stringify(variables)];
+    if (template.id) {
+      const id = Number(template.id);
+      this.run("UPDATE templates SET name = ?, category = ?, body = ?, variables = ? WHERE id = ?", [...params, id]);
+      return this.db.prepare("SELECT * FROM templates WHERE id = ?").get(id);
+    }
+    const result = this.run("INSERT INTO templates(name, category, body, variables) VALUES (?, ?, ?, ?)", params);
+    return this.db.prepare("SELECT * FROM templates WHERE id = ?").get(Number(result.lastInsertRowid));
   }
   removeTemplate(id) { return this.run("DELETE FROM templates WHERE id = ?", [id]); }
   duplicateTemplate(id) {
-    return this.run("INSERT INTO templates(name, category, body, variables) SELECT name || ' copy', category, body, variables FROM templates WHERE id = ?", [id]);
+    const result = this.run("INSERT INTO templates(name, category, body, variables) SELECT name || ' copy', category, body, variables FROM templates WHERE id = ?", [id]);
+    return this.db.prepare("SELECT * FROM templates WHERE id = ?").get(Number(result.lastInsertRowid));
   }
 
   listCampaigns() {
@@ -188,7 +200,9 @@ class WasendDatabase {
   }
   getCampaign(id) { return this.db.prepare("SELECT campaigns.*, templates.body AS template_body FROM campaigns LEFT JOIN templates ON templates.id = campaigns.template_id WHERE campaigns.id = ?").get(id); }
   createCampaign(campaign) {
-    const result = this.run("INSERT INTO campaigns(name, status, template_id, group_id, settings_json, scheduled_at, total_contacts) VALUES (?, ?, ?, ?, ?, ?, ?)", [campaign.name, campaign.status || "Draft", campaign.templateId || null, campaign.groupId || null, JSON.stringify(campaign.settings || {}), campaign.scheduledAt || null, Number(campaign.total || 0)]);
+    const templateId = coerceExistingId(this.db, "templates", campaign.templateId, "Choose a valid message template.");
+    const groupId = campaign.groupId ? coerceExistingId(this.db, "contact_groups", campaign.groupId, "Choose a valid contact group.") : null;
+    const result = this.run("INSERT INTO campaigns(name, status, template_id, group_id, settings_json, scheduled_at, total_contacts) VALUES (?, ?, ?, ?, ?, ?, ?)", [campaign.name, campaign.status || "Draft", templateId, groupId, JSON.stringify(campaign.settings || {}), campaign.scheduledAt || null, Number(campaign.total || 0)]);
     return { id: Number(result.lastInsertRowid), ...campaign };
   }
   duplicateCampaign(id) {
@@ -296,6 +310,14 @@ function normalizePhone(value) {
   const digits = String(value || "").replace(/\D/g, "");
   if (digits.length < 8 || digits.length > 15) return null;
   return `+${digits}`;
+}
+
+function coerceExistingId(db, table, value, message) {
+  const id = Number(value || 0);
+  if (!Number.isInteger(id) || id <= 0) throw new Error(message);
+  const exists = db.prepare(`SELECT id FROM ${table} WHERE id = ?`).get(id);
+  if (!exists) throw new Error(message);
+  return id;
 }
 
 module.exports = { WasendDatabase, normalizePhone };

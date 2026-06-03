@@ -4,9 +4,15 @@ const packagedBrowserCache = path.join(process.resourcesPath || path.join(__dirn
 const developmentBrowserCache = path.join(__dirname, "../../puppeteer-cache");
 process.env.PUPPETEER_CACHE_DIR ||= fs.existsSync(packagedBrowserCache) ? packagedBrowserCache : developmentBrowserCache;
 const puppeteer = require("puppeteer");
+const COMPOSER_SELECTOR = '[data-testid="conversation-compose-box-input"], div[contenteditable="true"][data-tab="10"], footer div[contenteditable="true"]';
+const SEND_SELECTOR = '[data-testid="send"], [data-testid="compose-btn-send"], [data-testid="media-editor-send"], button[aria-label="Send"], span[data-icon="send"], span[data-icon="wds-ic-send-filled"]';
+const ATTACH_SELECTOR = '[data-testid="attach-menu-plus"], [data-testid="clip"], span[data-icon="attach-menu-plus"], span[data-icon="plus"], button[title="Attach"]';
+const MEDIA_CAPTION_SELECTOR = '[data-testid="media-caption-input-container"] div[contenteditable], div[contenteditable="true"][data-tab="7"], div[role="dialog"] div[contenteditable="true"]';
+const MEDIA_PREVIEW_SELECTOR = '[data-testid="media-editor"], [data-testid="media-viewer"], div[role="dialog"]';
 
 class WhatsAppSession {
   constructor({ userDataPath, onStatus }) {
+    this.userDataPath = userDataPath;
     this.userDataDir = path.join(userDataPath, "whatsapp-session");
     this.onStatus = onStatus;
     this.status = { status: "disconnected" };
@@ -192,49 +198,178 @@ class WhatsAppSession {
 
   async sendMessage(contact, { message, mediaPath, typingSimulation }) {
     if (!this.page || this.status.status !== "connected") throw new Error("WhatsApp is not connected.");
-    const phone = String(contact.phone || "").replace(/\D/g, "");
+    let phone = String(contact.phone || "").replace(/[\s\-()+]/g, "");
+    if (phone.startsWith("0")) phone = phone.substring(1);
     if (!phone) throw new Error("The contact does not have a valid phone number.");
+    const text = String(message || "");
     try {
       await this.useHereIfNeeded();
-      await this.page.goto(`https://web.whatsapp.com/send?phone=${phone}&text=&app_absent=0`, { waitUntil: "domcontentloaded" });
+      const url = `https://web.whatsapp.com/send/?phone=${phone}&text&type=phone_number&app_absent=0`;
+      console.log(`Navigating to: ${url}`);
+      await this.page.goto(url, { waitUntil: "networkidle2", timeout: 30000 });
+      await this.page.waitForTimeout(3000);
       await this.useHereIfNeeded();
-      await this.page.waitForFunction(() => {
-        const input = document.querySelector('[data-testid="conversation-compose-box-input"], div[contenteditable="true"][data-tab="10"], footer div[contenteditable="true"]');
-        const invalidDialog = [...document.querySelectorAll('[data-testid="popup-contents"], div[role="dialog"]')]
-          .some((element) => /invalid|not on whatsapp|phone number shared via url/i.test(element.textContent || ""));
-        return input || invalidDialog;
-      }, { timeout: 20000 });
+
+      let inputFound = false;
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        inputFound = await this.page.evaluate(() => {
+          const selectors = [
+            'div[contenteditable="true"][data-tab="10"]',
+            'div[contenteditable="true"][data-tab="1"]',
+            '[data-testid="conversation-compose-box-input"]',
+            'footer div[contenteditable="true"]',
+            'div[title="Type a message"]',
+            'div[aria-label="Type a message"]',
+            'div[aria-placeholder="Type a message"]',
+          ];
+          return selectors.some((selector) => Boolean(document.querySelector(selector)));
+        });
+        if (inputFound) break;
+
+        const hasError = await this.page.evaluate(() => {
+          return Boolean(document.querySelector('[data-testid="popup-contents"]')) ||
+            Boolean(document.querySelector('div[data-animate-modal-body="true"]')) ||
+            [...document.querySelectorAll('div[role="dialog"]')].some((element) => /invalid|not on whatsapp|phone number shared via url/i.test(element.textContent || ""));
+        });
+        if (hasError) {
+          await this.page.keyboard.press("Enter");
+          await this.page.waitForTimeout(500);
+          throw new Error(`Number +${phone} is not registered on WhatsApp.`);
+        }
+
+        console.log(`Attempt ${attempt + 1}: input not found yet, waiting...`);
+        await this.page.waitForTimeout(1500);
+      }
+
+      if (!inputFound) throw new Error(`Could not find message input for +${phone} after 10 attempts.`);
+
       const invalidText = await this.invalidNumberDialogText();
       if (invalidText) throw new Error(`Number +${phone} is not available on WhatsApp. ${invalidText}`);
-      if (typingSimulation && message) await wait(randomDelay(1000, 3000));
+      if (typingSimulation && text) await wait(randomDelay(1000, 3000));
       if (mediaPath) {
-        await this.attachMedia(mediaPath, message || "");
+        await this.attachMedia(mediaPath, text);
         return;
       }
-      const input = await this.page.waitForSelector('[data-testid="conversation-compose-box-input"], div[contenteditable="true"][data-tab="10"], footer div[contenteditable="true"]', { timeout: 10000 });
-      await input.click();
-      await typeMultiline(this.page, input, message || "");
+
+      const inputSelector = await this.findComposerSelector();
+      console.log(`Using selector: ${inputSelector}`);
+      const inputBox = await this.page.$(inputSelector);
+      await inputBox.click();
+      await this.page.waitForTimeout(500);
+      await this.insertComposerText(text);
+      await this.page.waitForTimeout(500);
       await this.clickSend();
-      await wait(500);
+      await this.page.waitForTimeout(1000);
+      console.log(`Message sent to +${phone} successfully`);
     } catch (error) {
+      await this.debugScreenshot("send-failed").catch(() => {});
       throw new Error(`Could not send to +${phone}: ${error.message}`);
     }
   }
 
+  async findComposerSelector() {
+    const selector = await this.page.evaluate(() => {
+      const selectors = [
+        'div[contenteditable="true"][data-tab="10"]',
+        'div[contenteditable="true"][data-tab="1"]',
+        '[data-testid="conversation-compose-box-input"]',
+        'footer div[contenteditable="true"]',
+        'div[title="Type a message"]',
+        'div[aria-label="Type a message"]',
+        'div[aria-placeholder="Type a message"]',
+      ];
+      return selectors.find((item) => Boolean(document.querySelector(item))) || null;
+    });
+    if (!selector) throw new Error("Could not find message input selector.");
+    return selector;
+  }
+
+  async insertComposerText(message) {
+    const lines = String(message || "").split("\n");
+    for (let index = 0; index < lines.length; index += 1) {
+      await this.page.evaluate((text) => {
+        const element = document.querySelector(
+          'div[contenteditable="true"][data-tab="10"], ' +
+          'div[contenteditable="true"][data-tab="1"], ' +
+          '[data-testid="conversation-compose-box-input"], ' +
+          'footer div[contenteditable="true"], ' +
+          'div[title="Type a message"], ' +
+          'div[aria-label="Type a message"], ' +
+          'div[aria-placeholder="Type a message"]',
+        );
+        if (element) {
+          element.focus();
+          document.execCommand("insertText", false, text);
+        }
+      }, lines[index]);
+      if (index < lines.length - 1) {
+        await this.page.keyboard.down("Shift");
+        await this.page.keyboard.press("Enter");
+        await this.page.keyboard.up("Shift");
+      }
+    }
+  }
+
+  async debugScreenshot(label = "debug") {
+    if (!this.page) return null;
+    const directory = path.join(this.userDataPath, "wasend-data", "debug");
+    fs.mkdirSync(directory, { recursive: true });
+    const filePath = path.join(directory, `${label}-${Date.now()}.png`);
+    await this.page.screenshot({ path: filePath, fullPage: true });
+    console.log(`Screenshot saved: ${filePath}`);
+    return filePath;
+  }
+
+  async ensureComposerText(message) {
+    const input = await this.page.waitForSelector(COMPOSER_SELECTOR, { timeout: 10000 });
+    const current = await this.page.evaluate((selector) => {
+      const element = document.querySelector(selector);
+      return element ? (element.innerText || element.textContent || "").trim() : "";
+    }, COMPOSER_SELECTOR);
+    if (current === String(message).trim()) return input;
+    await input.click();
+    await selectAll(this.page);
+    await typeMultiline(this.page, input, message);
+    return input;
+  }
+
   async attachMedia(mediaPath, caption) {
-    const clip = await this.page.$('[data-testid="attach-menu-plus"], [data-testid="clip"], span[data-icon="attach-menu-plus"]');
+    if (!fs.existsSync(mediaPath)) throw new Error(`Attachment file was not found: ${mediaPath}`);
+    const clip = await this.page.waitForSelector(ATTACH_SELECTOR, { timeout: 10000 }).catch(() => null);
     if (!clip) throw new Error("WhatsApp attachment button was not found.");
-    await clip.click();
+    await clip.evaluate((element) => {
+      const target = element.closest("button,[role='button']") || element;
+      target.click();
+    });
     await wait(500);
-    const input = await this.page.waitForSelector('input[type="file"]', { timeout: 10000 });
-    await input.uploadFile(mediaPath);
-    await wait(1500);
+    await this.uploadAttachmentFile(mediaPath);
+    await this.page.waitForSelector(MEDIA_PREVIEW_SELECTOR, { timeout: 15000 }).catch(() => {});
+    await wait(1000);
     if (caption) {
-      const captionInput = await this.page.$('[data-testid="media-caption-input-container"] div[contenteditable], div[contenteditable="true"][data-tab="7"]');
-      if (captionInput) await typeMultiline(this.page, captionInput, caption);
+      const captionInput = await this.page.waitForSelector(MEDIA_CAPTION_SELECTOR, { timeout: 5000 }).catch(() => null);
+      if (captionInput) {
+        await captionInput.click();
+        await selectAll(this.page);
+        await typeMultiline(this.page, captionInput, caption);
+      }
     }
     await this.clickSend();
-    await wait(1000);
+    await wait(2000);
+  }
+
+  async uploadAttachmentFile(mediaPath) {
+    const inputs = await this.page.$$('input[type="file"]');
+    if (!inputs.length) throw new Error("WhatsApp file picker was not found.");
+    let lastError = null;
+    for (const input of inputs) {
+      try {
+        await input.uploadFile(mediaPath);
+        return;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw new Error(`Could not attach file: ${lastError?.message || "No compatible file input was found."}`);
   }
 
   async invalidNumberDialogText() {
@@ -246,9 +381,15 @@ class WhatsAppSession {
   }
 
   async clickSend() {
-    const send = await this.page.$('[data-testid="send"], [data-testid="compose-btn-send"], button[aria-label="Send"], span[data-icon="send"]');
-    if (send) await send.click();
-    else await this.page.keyboard.press("Enter");
+    const send = await this.page.waitForSelector(SEND_SELECTOR, { timeout: 10000 }).catch(() => null);
+    if (send) {
+      await send.evaluate((element) => {
+        const target = element.closest("button,[role='button']") || element;
+        target.click();
+      });
+      return;
+    }
+    await this.page.keyboard.press("Enter");
   }
 
   update(value) {
@@ -269,6 +410,13 @@ async function typeMultiline(page, input, message) {
       await page.keyboard.up("Shift");
     }
   }
+}
+
+async function selectAll(page) {
+  const modifier = process.platform === "darwin" ? "Meta" : "Control";
+  await page.keyboard.down(modifier);
+  await page.keyboard.press("A");
+  await page.keyboard.up(modifier);
 }
 
 module.exports = { WhatsAppSession };
